@@ -15,6 +15,12 @@
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/py.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/stream.py\" flush",
             "async": true,
             "timeout": 60
+          },
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/py.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/sync.py\"",
+            "async": true,
+            "timeout": 30
           }
         ]
       }

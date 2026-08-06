@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import config, registry  # noqa: E402
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 
 def cmd_status(_args):

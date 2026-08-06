@@ -1,4 +1,12 @@
-"""SessionEnd: report the project index to the course server.
+"""Report the project index to the course server. Runs at session start and end.
+
+Both ends, deliberately. Sending only at SessionEnd meant a student who
+installed the plugin, did some work, and never cleanly closed the session saw
+0% on the website while their machine held correct numbers, because the
+roll-up these figures are drawn from had never been posted. Sessions do not
+reliably end: editors get force-quit, laptops sleep, terminals get closed.
+Session start always happens, so it is the reliable half of the pair.
+
 
 This is what powers the website's project picker. It sends aggregate metadata
 about every repo the student has worked in, so they can later select which ones

@@ -21,7 +21,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import (config, counting, ledger, paths,  # noqa: E402
                   provenance, registry, repoutil)
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 
 
 def read_input():
