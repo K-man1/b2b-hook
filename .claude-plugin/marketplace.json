@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "ai-attribution-marketplace",
+  "description": "Course integrity tooling: AI authorship attribution for student repositories",
+  "owner": {
+    "name": "Karman Chhatwal"
+  },
+  "plugins": [
+    {
+      "name": "ai-attribution",
+      "description": "Tracks what share of a codebase was written by AI vs. by the student, with a git-anchored tamper-evident ledger for instructor verification",
+      "category": "productivity",
+      "source": "./"
+    }
+  ]
+}
