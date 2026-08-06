@@ -8,7 +8,7 @@
   "plugins": [
     {
       "name": "ai-attribution",
-      "description": "Tracks what share of a codebase was written by AI vs. by the student, with a git-anchored tamper-evident ledger for instructor verification",
+      "description": "Tracks what share of a codebase was written by AI vs. by the student, streaming an append-only ledger to the course server for instructor verification",
       "category": "productivity",
       "source": "./"
     }

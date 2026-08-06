@@ -22,7 +22,7 @@ disagree, and the server's copy is the one that gets graded.
 ### Install once, everywhere
 
 ```bash
-claude plugin marketplace add https://github.com/YOUR-ORG/ai-attribution
+claude plugin marketplace add https://github.com/K-man1/b2b-hook
 ```
 
 ```bash
