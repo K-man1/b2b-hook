@@ -19,7 +19,7 @@ def build(root, rid):
     totals = {t: {"raw": 0, "sig": 0} for t in provenance.ALL_TAGS}
     files = []
     tracked = repoutil.tracked_files(root)
-    counted = skipped = untracked_by_plugin = 0
+    counted = skipped = untracked_by_plugin = drifted_files = 0
 
     for rel in tracked:
         if counting.is_excluded(rel):
@@ -36,14 +36,30 @@ def build(root, rid):
             continue
 
         snap = provenance.load_snapshot(paths.snapshot_path(rid, rel))
-        if snap and snap.get("sha256") == provenance.sha256_text(text):
+        if snap is None:
+            # Never seen. Everything on disk predates tracking.
+            tags = provenance.baseline_tags(lines)
+            untracked_by_plugin += 1
+        elif snap.get("sha256") == provenance.sha256_text(text):
             tags = snap.get("tags", [])
         else:
-            # Either never seen, or changed since the snapshot was written.
-            # Both mean we cannot vouch for these lines' origin right now.
-            tags = provenance.baseline_tags(lines)
-            if snap is None:
-                untracked_by_plugin += 1
+            # Changed since the snapshot was written, i.e. edited outside a
+            # Claude session. Carry the surviving tags forward and attribute
+            # only the new lines, exactly as the drift sweep will at the next
+            # session start.
+            #
+            # Discarding every tag here instead, on the grounds that the file
+            # "changed", is wrong and was a real bug: appending one line to a
+            # file Claude wrote made the whole file read as unobserved, so a
+            # student who touched their code after an edit saw 0% AI and a
+            # tool that looked broken. The snapshot still holds correct
+            # per-line provenance for every line that did not change, and
+            # SequenceMatcher is what tells us which those are.
+            tags, _new_idx, _removed = provenance.retag(
+                snap.get("lines", []), snap.get("tags", []),
+                lines, provenance.TAG_HUMAN,
+            )
+            drifted_files += 1
 
         mask = counting.significant_mask(lines, rel)
         per_file = provenance.tally(tags, mask)
@@ -63,6 +79,7 @@ def build(root, rid):
             "files_counted": counted,
             "files_skipped": skipped,
             "files_never_observed": untracked_by_plugin,
+            "files_drifted": drifted_files,
         },
     }
 
@@ -98,6 +115,9 @@ def format_text(report):
                "never observed {}".format(
                    cov["files_counted"], cov["files_skipped"],
                    cov["files_never_observed"]))
+    if cov.get("files_drifted"):
+        out.append("{} file(s) changed since the plugin last saw them; those "
+                   "changes count as yours.".format(cov["files_drifted"]))
     out.append("")
     out.append("'unobserved' means the plugin never saw those lines written.")
     out.append("Lines added outside a Claude session appear only after the next")

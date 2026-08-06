@@ -1,7 +1,7 @@
 {
   "name": "ai-attribution",
   "description": "Tracks what share of a codebase was written by AI vs. by the student, with a git-anchored tamper-evident ledger for instructor verification",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "author": {
     "name": "Karman Chhatwal"
   }

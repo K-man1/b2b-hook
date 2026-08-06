@@ -188,6 +188,69 @@ def test_remote_credentials_stripped():
               "sekrit" not in url and url.endswith("github.com/o/r.git"), url)
 
 
+# --- report ---------------------------------------------------------------
+
+def test_report_survives_an_edit_outside_a_session():
+    """Touching a file after Claude wrote it must not erase its attribution.
+
+    The bug this guards against: the report treated "file differs from its
+    snapshot" as "we cannot vouch for any of it" and re-baselined the whole
+    file to `unobserved`. Appending a single line to a file Claude wrote
+    therefore dropped the AI count to zero, which made an honest student's
+    report show 0% AI and made the tool look broken. Unchanged lines still
+    have known provenance, and SequenceMatcher is what identifies them.
+    """
+    import subprocess
+    import tempfile
+    from core import paths, provenance, report as report_mod
+
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["AIATTR_DATA_DIR"] = os.path.join(d, "data")
+        import importlib
+        importlib.reload(paths)
+
+        repo = os.path.join(d, "repo")
+        os.makedirs(repo)
+        subprocess.run(["git", "init", "-q"], cwd=repo, capture_output=True)
+
+        ai_lines = ["line{}".format(i) for i in range(20)]
+        src = os.path.join(repo, "app.py")
+        with open(src, "w") as fh:
+            fh.write("\n".join(ai_lines) + "\n")
+        subprocess.run(["git", "add", "-A"], cwd=repo, capture_output=True)
+
+        rid = paths.repo_id(repo)
+        provenance.save_snapshot(
+            paths.snapshot_path(rid, "app.py"), ai_lines,
+            [provenance.TAG_AI] * 20,
+            provenance.sha256_text("\n".join(ai_lines) + "\n"),
+        )
+
+        r = report_mod.build(repo, rid)
+        check("a file matching its snapshot reports as AI",
+              r["totals"]["ai"]["raw"] == 20, str(r["totals"]))
+
+        # The student appends one line by hand, outside any Claude session.
+        with open(src, "a") as fh:
+            fh.write("mine\n")
+
+        r = report_mod.build(repo, rid)
+        ai = r["totals"]["ai"]["raw"]
+        human = r["totals"]["human"]["raw"]
+        unobs = r["totals"]["unobserved"]["raw"]
+        check("the 20 AI lines survive one hand-added line", ai == 20,
+              "ai={} human={} unobserved={}".format(ai, human, unobs))
+        check("the new line is attributed to the student", human == 1,
+              "human={}".format(human))
+        check("nothing is silently re-baselined", unobs == 0,
+              "unobserved={}".format(unobs))
+        check("the drift is surfaced in coverage",
+              r["coverage"].get("files_drifted") == 1,
+              str(r["coverage"]))
+        del os.environ["AIATTR_DATA_DIR"]
+        importlib.reload(paths)
+
+
 # --- streaming outbox -----------------------------------------------------
 
 def _seed_ledger(path, n):
@@ -341,6 +404,7 @@ def main():
     print("line counting");         test_no_phantom_line(); test_significant_lines()
     print("ledger integrity");      test_chain_detects_tampering()
     print("reconciliation");        test_allocation_by_time(); test_split_never_exceeds_added()
+    print("report");                test_report_survives_an_edit_outside_a_session()
     print("streaming outbox");      test_watermark_only_advances_on_acknowledgement()
     print("                 ");     test_debounce_lets_backlog_through()
     print("server-held ledger");    test_server_copy_survives_a_rewritten_repo_ledger()
