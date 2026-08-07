@@ -153,9 +153,9 @@ def cmd_flush(args):
         print("Reporting is not configured. Run `configure` first.")
         return 1
 
-    from core import outbox, paths
+    from core import outbox, paths, repoutil
 
-    root = paths.repo_root(os.path.abspath(args.path or os.getcwd()))
+    root = repoutil.repo_root(os.path.abspath(args.path or os.getcwd()))
     if not root:
         print("Not inside a git repository.")
         return 1

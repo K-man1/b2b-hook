@@ -66,7 +66,7 @@ def remove(rid):
 
 
 def update(rid, name, remote, totals=None, ledger_head=None,
-           ledger_records=None, head=None, path=None):
+           ledger_records=None, path=None):
     """Upsert one repo's entry. Locked, because hooks run concurrently.
 
     The same lock discipline as the ledger: several sessions can be open at
@@ -89,8 +89,6 @@ def update(rid, name, remote, totals=None, ledger_head=None,
             entry["ledger_head"] = ledger_head
         if ledger_records is not None:
             entry["ledger_records"] = ledger_records
-        if head is not None:
-            entry["head"] = head
         if path is not None:
             # Local only. Needed to honour the opt-out list, which is expressed
             # as paths while the index is keyed by hashed id. Stripped from
@@ -143,7 +141,6 @@ def sync_payload(student_id, client_version):
                 "totals": p.get("totals"),
                 "ledger_head": p.get("ledger_head"),
                 "ledger_records": p.get("ledger_records"),
-                "head": p.get("head"),
             }
             for p in projects()
         ],

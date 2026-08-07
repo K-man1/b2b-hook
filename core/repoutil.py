@@ -1,5 +1,11 @@
 """Thin git wrappers. Every call is read-only and failure-tolerant.
 
+Git is used to answer three local questions and nothing else: where does this
+repo start, which files does it track, and where is it pointed. History is
+never walked. An earlier version reconstructed commit diffs here to reconcile
+them against recorded edits; that check is gone, and so are the helpers that
+served it.
+
 Nothing here may raise into a hook. A student mid-rebase, in a repo with no
 commits, or with git missing from PATH must still get a working session, so
 each helper degrades to None or an empty result.
@@ -26,6 +32,13 @@ def _git(root, args, timeout=20):
     return out.stdout
 
 
+def repo_root(start_dir):
+    """Absolute path to the enclosing git work tree, or None if not in one."""
+    out = _git(start_dir, ["rev-parse", "--show-toplevel"], timeout=10)
+    root = (out or "").strip()
+    return os.path.realpath(root) if root else None
+
+
 def remote_url(root):
     """origin's URL, or None. Used to identify a repo to the instructor's side.
 
@@ -42,12 +55,6 @@ def remote_url(root):
     return url or None
 
 
-def head_sha(root):
-    """Current HEAD, or None in a repo with no commits yet."""
-    out = _git(root, ["rev-parse", "HEAD"])
-    return out.strip() if out else None
-
-
 def tracked_files(root):
     """Files git knows about, which gives us .gitignore compliance for free.
 
@@ -58,112 +65,6 @@ def tracked_files(root):
     if out is None:
         return []
     return [p for p in out.split("\0") if p]
-
-
-def numstat(root, rev_range):
-    """[(added, removed, path)] for a commit or range. Binary files skipped."""
-    out = _git(root, ["diff", "--numstat", "-z", rev_range])
-    if out is None:
-        return []
-    return _parse_numstat_z(out)
-
-
-def numstat_commit(root, sha):
-    """Lines added/removed by a single commit, against its first parent.
-
-    Merges report nothing: a merge's diff against one parent double-counts
-    work already attributed to the branch it came from.
-    """
-    if is_merge(root, sha):
-        return []
-    out = _git(root, ["show", "--numstat", "-z", "--format=", sha])
-    if out is None:
-        return []
-    return _parse_numstat_z(out)
-
-
-def _parse_numstat_z(out):
-    """Parse `--numstat -z` output.
-
-    The -z format is awkward: normal entries are "adds\tdels\tpath\0", but a
-    rename emits "adds\tdels\t\0oldpath\0newpath\0", spending three NUL-
-    separated fields on one record. Getting this wrong silently mis-attributes
-    every renamed file, so the two shapes are handled explicitly.
-    """
-    parts = out.split("\0")
-    rows = []
-    i = 0
-    while i < len(parts):
-        rec = parts[i]
-        if not rec:
-            i += 1
-            continue
-        fields = rec.split("\t")
-        if len(fields) < 3:
-            i += 1
-            continue
-        adds, dels, path = fields[0], fields[1], fields[2]
-        if path == "":
-            # Rename/copy: the real paths are the next two NUL-separated fields.
-            if i + 2 < len(parts):
-                path = parts[i + 2]
-                i += 3
-            else:
-                break
-        else:
-            i += 1
-        if adds == "-" or dels == "-":
-            continue  # binary
-        try:
-            rows.append((int(adds), int(dels), path))
-        except ValueError:
-            continue
-    return rows
-
-
-def is_merge(root, sha):
-    out = _git(root, ["rev-list", "--parents", "-n", "1", sha])
-    return bool(out) and len(out.split()) > 2
-
-
-def commits_touching(root, relpath):
-    """Commit SHAs that modified a path, oldest first."""
-    out = _git(root, ["log", "--reverse", "--format=%H", "--", relpath])
-    return out.split() if out else []
-
-
-def all_commits(root):
-    """Every commit reachable from HEAD, oldest first."""
-    out = _git(root, ["log", "--reverse", "--format=%H"])
-    return out.split() if out else []
-
-
-def commit_meta(root, sha):
-    out = _git(root, ["show", "-s", "--format=%H%x1f%an%x1f%aI%x1f%s", sha])
-    if not out:
-        return None
-    f = out.strip().split("\x1f")
-    if len(f) < 4:
-        return None
-    return {"sha": f[0], "author": f[1], "date": f[2], "subject": f[3]}
-
-
-def file_at_commit(root, sha, relpath):
-    """File contents as of a commit, or None if absent there."""
-    return _git(root, ["show", "{}:{}".format(sha, relpath)])
-
-
-def is_ignored(root, relpath):
-    """True if .gitignore excludes this path. Used to catch a student who
-    gitignores the ledger so it never reaches the instructor."""
-    try:
-        out = subprocess.run(
-            ["git", "check-ignore", "-q", relpath],
-            cwd=root, capture_output=True, timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return False
-    return out.returncode == 0
 
 
 def read_text(path):

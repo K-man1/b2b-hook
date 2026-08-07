@@ -222,7 +222,6 @@ def main():
            plugin_version=C.VERSION,
            settings_fingerprint=fingerprint,
            hooks_disabled_flag=disabled,
-           head=C.repoutil.head_sha(ctx["root"]) or "",
            files_drifted=drifted,
            files_baselined=baselined,
            files_reset=reset,

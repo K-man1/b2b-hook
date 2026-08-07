@@ -26,7 +26,6 @@ written there.
 
 import hashlib
 import os
-import subprocess
 
 # Legacy. Repos tracked by an older version still have a committed .aiattr/
 # directory; nothing reads it any more, but counting.EXCLUDE_GLOBS still drops
@@ -64,24 +63,6 @@ def legacy_data_dirs():
         return []
     return [os.path.join(base, n) for n in names
             if "ai-attribution" in n or n == "b2b-hook-local"]
-
-
-def repo_root(start_dir):
-    """Absolute path to the enclosing git work tree, or None if not in one."""
-    try:
-        out = subprocess.run(
-            ["git", "rev-parse", "--show-toplevel"],
-            cwd=start_dir,
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return None
-    if out.returncode != 0:
-        return None
-    root = out.stdout.strip()
-    return os.path.realpath(root) if root else None
 
 
 def repo_id(root):

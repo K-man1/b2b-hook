@@ -48,7 +48,7 @@ def context(payload):
     anything they submit.
     """
     cwd = payload.get("cwd") or os.getcwd()
-    root = paths.repo_root(cwd)
+    root = repoutil.repo_root(cwd)
     if not root:
         return None
     # Installed at user scope, the hooks fire in every repo the student opens,
@@ -75,7 +75,7 @@ def skip_reason(payload):
     opted out of it is just wrong.
     """
     cwd = payload.get("cwd") or os.getcwd()
-    root = paths.repo_root(cwd)
+    root = repoutil.repo_root(cwd)
     if not root:
         return "no_repo"
     if config.is_ignored(root):

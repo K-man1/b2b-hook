@@ -60,11 +60,10 @@ def main():
         ctx["rid"], os.path.basename(ctx["root"]),
         C.repoutil.remote_url(ctx["root"]),
         totals=data.get("totals"), ledger_head=head, ledger_records=seq + 1,
-        head=C.repoutil.head_sha(ctx["root"]) or "", path=ctx["root"],
+        path=ctx["root"],
     )
 
     C.emit(ctx, "session_end",
-           head=C.repoutil.head_sha(ctx["root"]) or "",
            ledger_head=head, ledger_seq=seq,
            **totals_summary(data))
 
