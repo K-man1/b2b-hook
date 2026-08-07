@@ -4,7 +4,6 @@ Plain asserts and no test framework, so this runs anywhere the plugin does.
 Every test here exists because something was actually broken at some point.
 """
 
-import importlib.util
 import os
 import sys
 
@@ -12,11 +11,6 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
 from core import counting, ledger, provenance, repoutil  # noqa: E402
-
-_spec = importlib.util.spec_from_file_location(
-    "verify_repo", os.path.join(ROOT, "verifier", "verify_repo.py"))
-verify = importlib.util.module_from_spec(_spec)
-_spec.loader.exec_module(verify)
 
 PASS, FAIL = [], []
 
@@ -73,7 +67,10 @@ def test_significant_lines():
     check("blank and comment lines are not significant",
           mask == [True, False, False, True], str(mask))
     check("lockfiles are excluded", counting.is_excluded("package-lock.json"))
-    check("the ledger is never counted as code",
+    # Nothing writes .aiattr/ any more, but repos tracked by an older version
+    # still have one committed. It must stay excluded or an abandoned ledger
+    # counts as thousands of lines of authored code.
+    check("a legacy committed ledger is never counted as code",
           counting.is_excluded(".aiattr/ledger.jsonl"))
 
 
@@ -92,54 +89,6 @@ def test_chain_detects_tampering():
         problems = ledger.verify_chain(recs)
         check("edited record is caught",
               any(p["kind"] == "hash_mismatch" for p in problems), str(problems))
-
-
-# --- reconciliation -------------------------------------------------------
-
-def test_allocation_by_time():
-    """Records attach to the commit that closed over the work, not to the
-    commit whose diff happens to carry the ledger.
-
-    Regression: a student committing from an IDE that stages only source files
-    leaves the ledger a commit behind. Allocating by ledger position scored
-    their AI work as `unattributed`, which falsely accuses an honest student.
-    """
-    def gt(m):
-        return "2026-08-06T10:%02d:00+00:00" % m
-
-    def lt(m):
-        return "2026-08-06T10:%02d:00Z" % m
-
-    commits = [
-        {"sha": "c1", "time": verify._parse_ts(gt(0)), "added": 6},
-        {"sha": "c2", "time": verify._parse_ts(gt(10)), "added": 15},
-        {"sha": "c3", "time": verify._parse_ts(gt(20)), "added": 2},
-        {"sha": "c4", "time": verify._parse_ts(gt(30)), "added": 81},
-    ]
-    records = [
-        {"kind": "edit", "ts": lt(5), "lines_ai": 15},
-        {"kind": "drift", "ts": lt(15), "lines_human": 2},
-    ]
-    buckets, pending = verify.allocate_by_time(records, commits)
-    check("AI edit attaches to the commit that followed it",
-          [r["kind"] for r in buckets["c2"]] == ["edit"], str(buckets))
-    check("hand edit attaches to its own commit",
-          [r["kind"] for r in buckets["c3"]] == ["drift"])
-    check("the paste commit gets no records", buckets["c4"] == [])
-    check("nothing left pending", pending == [])
-
-
-def test_split_never_exceeds_added():
-    """Rewriting a file repeatedly logs more line-events than git ever sees."""
-    commits = [{"sha": "c1", "time": verify._parse_ts("2026-08-06T10:00:00+00:00"),
-                "added": 10}]
-    records = [{"kind": "edit", "ts": "2026-08-06T09:59:00Z", "lines_ai": 50}]
-    buckets, _ = verify.allocate_by_time(records, commits)
-    check("churn is allocated", len(buckets["c1"]) == 1)
-    # 50 events against 10 real lines must cap at 10, not report 500%.
-    ai_ev = 50
-    explained = min(10, ai_ev)
-    check("explained portion is capped at what git shows", explained == 10)
 
 
 def test_opt_out_is_not_reported():
@@ -274,7 +223,7 @@ def test_watermark_only_advances_on_acknowledgement():
         from core import outbox, paths
         importlib.reload(paths); importlib.reload(outbox)
 
-        lp = os.path.join(d, "repo", ".aiattr", "ledger.jsonl")
+        lp = paths.ledger_path("rid")
         _seed_ledger(lp, 5)
 
         pending, backlog = outbox.unsent("rid", lp)
@@ -326,75 +275,35 @@ def test_debounce_lets_backlog_through():
         del os.environ["AIATTR_DATA_DIR"]
 
 
-def test_server_copy_survives_a_rewritten_repo_ledger():
-    """The property the whole streaming design exists to provide.
+def test_a_resend_is_distinguishable_from_a_rewrite():
+    """What the server needs from the chain, now that it holds the only copy.
 
-    A student edits the ledger in their repo, rebuilds the hash chain so it
-    validates on its own terms, and commits. The repo's copy is now internally
-    consistent and says what they want. The server's copy, delivered before any
-    of that happened, must contradict it — and must do so from a single check,
-    with no earlier observation of git history to compare against.
+    Delivery is unreliable, so the same record can legitimately arrive twice.
+    An edited record can also arrive claiming a seq the server already stored.
+    Those two cases must not look alike: the first is free to discard, the
+    second is the local stream having been altered after delivery. seq plus
+    hash is what separates them, and this is the only job the chain still does.
     """
     import tempfile
     with tempfile.TemporaryDirectory() as d:
-        repo = os.path.join(d, "repo")
-        os.makedirs(os.path.join(repo, ".aiattr"))
-        lp = os.path.join(repo, ".aiattr", "ledger.jsonl")
+        lp = os.path.join(d, "ledger.jsonl")
         _seed_ledger(lp, 3)
+        stored, _ = ledger.read_all(lp)
 
-        delivered, _ = ledger.read_all(lp)
-        server = [dict(r) for r in delivered]
+        by_seq = {r["seq"]: r["hash"] for r in stored}
+        honest_resend = dict(stored[1])
+        check("an identical resend matches what is stored",
+              by_seq[honest_resend["seq"]] == honest_resend["hash"])
 
-        # Rewrite the repo's copy: AI becomes human, chain rebuilt to match.
-        prev = ledger.GENESIS
-        rewritten = []
-        for rec in delivered:
-            body = {k: v for k, v in rec.items() if k != "hash"}
-            body["lines_human"] = body.pop("lines_ai", 0)
-            body["prev_hash"] = prev
-            body["hash"] = ledger.record_hash(body)
-            prev = body["hash"]
-            rewritten.append(body)
-        with open(lp, "w", newline="\n") as fh:
-            for rec in rewritten:
-                fh.write(ledger.canonical(rec) + "\n")
-
-        check("the rewritten repo ledger validates on its own",
-              ledger.verify_chain(rewritten) == [], "chain should self-validate")
-
-        findings = verify.Findings()
-        verify.compare_to_repo_copy(repo, server, findings)
-        codes = [f["code"] for f in findings.ranked()]
-        check("the server copy contradicts the rewrite",
-              "ledger_contradicts_server" in codes, str(codes))
-        check("and it is critical",
-              findings.worst() == verify.CRITICAL, findings.worst())
-
-
-def test_offline_records_are_reported_not_accused():
-    """Records that never reached the server are a warning, not an accusation.
-
-    A student who works offline and submits before the plugin can flush is
-    indistinguishable, at this layer, from one who hand-wrote extra records.
-    Both produce local records the server never saw. Treating that as critical
-    would fail honest students on bad wifi, which is the worst mistake this
-    tool can make, so it reports and lets a human decide.
-    """
-    import tempfile
-    with tempfile.TemporaryDirectory() as d:
-        repo = os.path.join(d, "repo")
-        os.makedirs(os.path.join(repo, ".aiattr"))
-        lp = os.path.join(repo, ".aiattr", "ledger.jsonl")
-        _seed_ledger(lp, 4)
-        local, _ = ledger.read_all(lp)
-
-        findings = verify.Findings()
-        verify.compare_to_repo_copy(repo, local[:2], findings)  # last 2 undelivered
-        codes = [f["code"] for f in findings.ranked()]
-        check("undelivered records are surfaced",
-              "records_never_delivered" in codes, str(codes))
-        check("but not treated as tampering",
-              findings.worst() == verify.WARNING, findings.worst())
+        # The student rewrites record 1 and rebuilds the chain so the file
+        # validates on its own terms, then the plugin resends it.
+        rewritten = dict(stored[1])
+        rewritten["lines_human"] = rewritten.pop("lines_ai", 0)
+        rewritten["hash"] = ledger.record_hash(
+            {k: v for k, v in rewritten.items() if k != "hash"})
+        check("a rewritten record collides at the same seq",
+              rewritten["seq"] == stored[1]["seq"]
+              and by_seq[rewritten["seq"]] != rewritten["hash"])
 
 
 def main():
@@ -403,12 +312,10 @@ def main():
     print("provenance");            test_carry_forward()
     print("line counting");         test_no_phantom_line(); test_significant_lines()
     print("ledger integrity");      test_chain_detects_tampering()
-    print("reconciliation");        test_allocation_by_time(); test_split_never_exceeds_added()
+    print("                ");      test_a_resend_is_distinguishable_from_a_rewrite()
     print("report");                test_report_survives_an_edit_outside_a_session()
     print("streaming outbox");      test_watermark_only_advances_on_acknowledgement()
     print("                 ");     test_debounce_lets_backlog_through()
-    print("server-held ledger");    test_server_copy_survives_a_rewritten_repo_ledger()
-    print("                  ");    test_offline_records_are_reported_not_accused()
     print("privacy / opt-out");     test_opt_out_is_not_reported(); test_remote_credentials_stripped()
     print()
     print("{} passed, {} failed".format(len(PASS), len(FAIL)))

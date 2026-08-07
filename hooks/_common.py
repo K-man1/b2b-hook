@@ -6,8 +6,9 @@ Every hook in this plugin obeys two rules:
      PreToolUse can, and a monitoring tool that wedges a student's session
      would simply get uninstalled. Every entry point exits 0 no matter what.
 
-  2. It never writes source code into the repo. Only counts and hashes go into
-     the ledger; file contents stay in the plugin data directory.
+  2. It never writes into the repo at all. Records and snapshots both live
+     under the plugin data directory, so a tracked project's working tree is
+     exactly as the student left it.
 """
 
 import json
@@ -21,7 +22,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from core import (config, counting, ledger, paths,  # noqa: E402
                   provenance, registry, repoutil)
 
-VERSION = "0.5.1"
+VERSION = "0.6.0"
 
 
 def read_input():
@@ -40,8 +41,11 @@ def now_iso():
 def context(payload):
     """Resolve repo context, or None when there is nothing to track.
 
-    No git repo means no transport to the instructor, so the plugin stays
-    silent rather than accumulating state that can never be delivered.
+    Still gated on being inside a git work tree, even though git is no longer
+    the transport. A repo is the unit the student picks in the project list,
+    and repo_id is what namespaces both the record stream and the snapshots.
+    Tracking a bare directory would produce work that can never be attached to
+    anything they submit.
     """
     cwd = payload.get("cwd") or os.getcwd()
     root = paths.repo_root(cwd)
@@ -49,14 +53,15 @@ def context(payload):
         return None
     # Installed at user scope, the hooks fire in every repo the student opens,
     # including personal projects unrelated to the course. Honour the opt-out
-    # list rather than writing a ledger into all of them.
+    # list rather than recording all of them.
     if config.is_ignored(root):
         return None
+    rid = paths.repo_id(root)
     return {  # noqa: E122
         "cwd": cwd,
         "root": root,
-        "rid": paths.repo_id(root),
-        "ledger": paths.ledger_path(root),
+        "rid": rid,
+        "ledger": paths.ledger_path(rid),
         "session_id": payload.get("session_id", ""),
     }
 

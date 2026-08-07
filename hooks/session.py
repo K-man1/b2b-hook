@@ -5,10 +5,12 @@ or pasted it in from a browser. None of that fires a tool hook. The sweep here
 catches all of it as *observed* change (tagged `human`) by comparing every
 tracked file against its snapshot.
 
-Note the limit honestly: the sweep sees that lines changed, not who or what
-produced them. Pasted AI code and hand-typed code are identical on disk. That
-distinction is not recoverable client-side, which is exactly why the
-instructor's verifier reconciles against git rather than trusting this number.
+Note the limit honestly, because it is the sharpest edge in this tool: the
+sweep sees that lines changed, not who or what produced them. Pasted AI code
+and hand-typed code are identical on disk, so both land in `human`. Nothing
+downstream recovers that distinction; it is gone at the moment of observation.
+A file the plugin has never seen at all is different, and better: it baselines
+as `unobserved` rather than being credited to anyone.
 """
 
 import hashlib
@@ -199,8 +201,8 @@ def main():
                 "systemMessage": "AI attribution: this folder is not a git "
                                  "repository, so no code authorship is being "
                                  "recorded. Run `git init` before starting "
-                                 "work, or anything written now will show as "
-                                 "unattributed."
+                                 "work, or anything written now will go "
+                                 "untracked."
             }))
         return
 

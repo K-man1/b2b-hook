@@ -19,7 +19,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from core import config, registry  # noqa: E402
 
-VERSION = "0.5.1"
+VERSION = "0.6.0"
 
 
 def cmd_status(_args):
@@ -48,10 +48,8 @@ def cmd_status(_args):
         from core import outbox, paths
         behind = []
         for row in rows:
-            root = row.get("path")
-            if not root:
-                continue
-            _pending, backlog = outbox.unsent(row["id"], paths.ledger_path(root))
+            _pending, backlog = outbox.unsent(row["id"],
+                                              paths.ledger_path(row["id"]))
             if backlog:
                 behind.append((row.get("name") or "?", backlog))
         if behind:
@@ -102,8 +100,9 @@ def cmd_projects(args):
             (r.get("last_activity") or "")[:19],
             g("ai"), g("human"), g("unobserved")))
     print()
-    print("Totals are what this machine observed. Your instructor's numbers")
-    print("come from verifying the ledger you pushed, not from this list.")
+    print("Totals are what this machine observed while Claude Code was open.")
+    print("Lines it never saw written show as 'unobs' and are neither yours")
+    print("nor AI's as far as this tool knows.")
     return 0
 
 
@@ -119,7 +118,7 @@ def cmd_ignore(args):
         if target not in ignore:
             ignore.append(target)
         print("Ignoring {}".format(target))
-        print("No attribution will be recorded there, and no ledger written.")
+        print("No attribution will be recorded there, and nothing reported.")
     cfg["ignore"] = ignore
     config.save(cfg)
 
@@ -134,6 +133,12 @@ def cmd_ignore(args):
         if registry.remove(rid):
             print("Removed it from your project index as well.")
         _outbox.forget(rid)
+        # Drop the local record stream too. Leaving it would keep undelivered
+        # records for a repo the student just said is none of our business.
+        try:
+            os.unlink(_paths.ledger_path(rid))
+        except OSError:
+            pass
     return 0
 
 
@@ -156,7 +161,7 @@ def cmd_flush(args):
         return 1
 
     rid = paths.repo_id(root)
-    _pending, backlog = outbox.unsent(rid, paths.ledger_path(root))
+    _pending, backlog = outbox.unsent(rid, paths.ledger_path(rid))
     print("{}: {} record(s) not yet delivered".format(
         os.path.basename(root), backlog))
     if not backlog:
@@ -169,7 +174,7 @@ def cmd_flush(args):
     subprocess.run([sys.executable, hook, "flush"],
                    input=payload, text=True, timeout=120)
 
-    _pending, remaining = outbox.unsent(rid, paths.ledger_path(root))
+    _pending, remaining = outbox.unsent(rid, paths.ledger_path(rid))
     if remaining:
         print("{} still undelivered. The server may be unreachable.".format(remaining))
         return 1

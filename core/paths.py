@@ -1,29 +1,37 @@
 """Where state lives, and why it lives there.
 
-Two separate stores, deliberately:
+Everything is local. Nothing this plugin writes goes into the student's repo.
 
-  <repo>/.aiattr/            committed to the student's repo. Metrics and
-                             hashes only. This is the channel that reaches
-                             the instructor, via their normal git push.
+Earlier versions committed a hash-chained ledger to `<repo>/.aiattr/` and used
+the student's own `git push` as the delivery channel. That is gone. Records are
+streamed to the course server as they are written, so the repo never needed to
+carry a copy, and carrying one meant writing into every project the student
+opened and staging a file into commits they did not ask us to touch.
 
-  $CLAUDE_PLUGIN_DATA/       NOT committed. Holds file content snapshots,
-                             which is the only place source text is kept.
-                             Keeping it out of the repo is what guarantees
-                             source code never leaves the machine.
+What remains, all under plugin_data_dir():
+
+  ledgers/<rid>.jsonl   the record stream for one repo. A local cache and a
+                        send queue, not evidence: the server's copy is the one
+                        that counts. Kept on disk so that work done offline
+                        survives until it can be delivered.
+
+  snapshots/<rid>/      file content snapshots, the only place source text is
+                        kept. Never leaves the machine, which is what makes the
+                        privacy promise true rather than aspirational.
 
 $CLAUDE_PLUGIN_ROOT is explicitly documented as ephemeral (the directory is
 cleaned up roughly two weeks after a plugin update), so nothing durable may be
-written there. $CLAUDE_PLUGIN_DATA resolves to ~/.claude/plugins/data/{id}/ and
-survives updates, so that is the snapshot home.
+written there.
 """
 
 import hashlib
 import os
 import subprocess
 
-LEDGER_DIRNAME = ".aiattr"
-LEDGER_FILENAME = "ledger.jsonl"
-REPORT_FILENAME = "report.json"
+# Legacy. Repos tracked by an older version still have a committed .aiattr/
+# directory; nothing reads it any more, but counting.EXCLUDE_GLOBS still drops
+# it so an abandoned ledger is never counted as authored code.
+LEGACY_LEDGER_DIRNAME = ".aiattr"
 
 
 def plugin_data_dir():
@@ -86,16 +94,14 @@ def repo_id(root):
     return hashlib.sha256(os.path.realpath(root).encode("utf-8")).hexdigest()[:16]
 
 
-def ledger_dir(root):
-    return os.path.join(root, LEDGER_DIRNAME)
+def ledger_path(rid):
+    """The local record stream for one repo.
 
-
-def ledger_path(root):
-    return os.path.join(root, LEDGER_DIRNAME, LEDGER_FILENAME)
-
-
-def report_path(root):
-    return os.path.join(root, LEDGER_DIRNAME, REPORT_FILENAME)
+    Keyed by repo id rather than living inside the repo, so two clones of the
+    same project on one machine keep separate streams and neither writes into
+    the working tree.
+    """
+    return os.path.join(plugin_data_dir(), "ledgers", rid + ".jsonl")
 
 
 def snapshots_dir(rid):

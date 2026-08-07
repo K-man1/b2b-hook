@@ -2,3 +2,8 @@ __pycache__/
 *.pyc
 *.pyo
 .DS_Store
+
+# Legacy: written by ai-attribution < 0.6.0, which committed a ledger into
+# the repo. Nothing reads it now. Ignored so a still-installed old build
+# cannot re-add it.
+.aiattr/

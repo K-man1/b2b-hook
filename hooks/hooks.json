@@ -1,5 +1,5 @@
 {
-  "description": "AI authorship attribution: per-line provenance tracking with a git-anchored, hash-chained ledger",
+  "description": "AI authorship attribution: per-line provenance tracking, streamed to the course server",
   "hooks": {
     "SessionStart": [
       {
@@ -35,18 +35,6 @@
             "timeout": 30
           }
         ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/py.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint.py\" stage",
-            "if": "Bash(git commit:*)",
-            "timeout": 60,
-            "statusMessage": "Recording attribution checkpoint"
-          }
-        ]
       }
     ],
     "PostToolUse": [
@@ -65,17 +53,6 @@
             "timeout": 30
           }
         ]
-      },
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/py.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint.py\" anchor",
-            "if": "Bash(git commit:*)",
-            "timeout": 60
-          }
-        ]
       }
     ],
     "SessionEnd": [
@@ -83,7 +60,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/py.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/checkpoint.py\" flush",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/py.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/session_end.py\"",
             "timeout": 60
           },
           {

@@ -1,12 +1,14 @@
 """Roll per-file provenance up into a repo-wide report.
 
-This is the student-facing view. It can only describe what the plugin actually
-observed, so it reports three buckets (ai / human / unobserved) plus coverage.
-The fourth and most important bucket, `unattributed`, cannot be computed here:
-it comes from comparing the ledger against real commit diffs, which is the
-instructor's verifier's job. A student-side report that claimed to know its own
-blind spots would be the same self-reporting mistake this design exists to
-avoid.
+Three buckets, and `unobserved` is the one to read first. It is every line the
+plugin never watched arrive: code that predates tracking, and code written
+while no session was open. It is not a rounding error, it is the measure of how
+much of this repo the tool can say anything about at all.
+
+Computed from local snapshots, so it describes current file state rather than a
+sum of past events. That matters: rewriting the same file ten times produces ten
+edit records but one final set of lines, and the honest question is who wrote
+the lines that are actually there now.
 """
 
 import os
@@ -119,10 +121,10 @@ def format_text(report):
         out.append("{} file(s) changed since the plugin last saw them; those "
                    "changes count as yours.".format(cov["files_drifted"]))
     out.append("")
-    out.append("'unobserved' means the plugin never saw those lines written.")
-    out.append("Lines added outside a Claude session appear only after the next")
-    out.append("session start. Your instructor's verifier computes a fourth")
-    out.append("bucket, 'unattributed', by reconciling this against git history.")
+    out.append("'unobserved' means the plugin never saw those lines written:")
+    out.append("they were on disk before tracking started, or added while no")
+    out.append("session was open. Lines you changed between sessions show as")
+    out.append("'human' once the next session start sweeps for them.")
 
     if report["files"]:
         out.append("")

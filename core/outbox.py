@@ -1,9 +1,9 @@
 """Tracks which ledger records have reached the server.
 
-The ledger in the student's repo is written first and is always complete. This
-module only remembers how much of it has been *delivered*, as one watermark per
-repo: the highest seq the server has acknowledged. Everything above the
-watermark is unsent.
+The local ledger is written first and is always complete. This module only
+remembers how much of it has been *delivered*, as one watermark per repo: the
+highest seq the server has acknowledged. Everything above the watermark is
+unsent.
 
 Why a watermark and not a queue: the ledger already is the queue. It is
 append-only, ordered by seq, and on disk before anything is sent. Duplicating
@@ -110,11 +110,11 @@ def forget(rid):
 def unsent(rid, ledger_file, limit=500):
     """Records above the watermark, oldest first.
 
-    Returns whole records exactly as they appear in the ledger, because the
-    server's copy has to hash to the same value the student's does. Stripping
-    or rewriting a field here would produce a server-side record that fails its
-    own integrity check at verification time, which reads as tampering by a
-    student who did nothing wrong.
+    Returns whole records exactly as they appear on disk, because the server's
+    copy has to hash to the same value the local one does. Stripping or
+    rewriting a field here would produce a stored record whose hash disagrees
+    with the chain it belongs to, which reads as tampering by a student who did
+    nothing wrong.
 
     `limit` caps one batch so a student who worked offline for a month sends in
     chunks rather than one request large enough to be rejected.

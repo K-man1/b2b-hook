@@ -1,7 +1,7 @@
 """Student-facing report. Backs the /ai-report command.
 
-Reads only local snapshot state, so it shows the three observed buckets and
-says nothing about `unattributed`, which requires git reconciliation.
+Reads local snapshot state only. Nothing here talks to the server, and the
+numbers it prints are the same ones the machine reports.
 """
 
 import os
@@ -17,8 +17,8 @@ def main():
     root = paths.repo_root(start)
     if not root:
         print("Not inside a git repository, so there is nothing to report.")
-        print("This plugin only tracks files in a git work tree, because the")
-        print("repo is how the ledger reaches your instructor.")
+        print("This plugin only tracks files in a git work tree, because a")
+        print("repository is the unit you pick when you submit a project.")
         return 0
     print(report.format_text(report.build(root, paths.repo_id(root))))
     return 0

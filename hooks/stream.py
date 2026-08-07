@@ -1,16 +1,20 @@
 """Stream ledger records to the course server as they are written.
 
-This is the integrity channel. `sync.py` sends a roll-up the student's machine
-computed; this sends the raw records, and the server stores them append-only.
+This is the only channel that carries evidence. `sync.py` sends a roll-up the
+student's machine computed; this sends the raw records, and the server stores
+them append-only.
 
-Why that difference matters more than it sounds. When the only copy of the
-ledger lives in the student's repo, a student who wants different numbers can
-edit it, recompute the hash chain so it self-validates, and force-push. Nothing
-in the repo contradicts them afterwards; catching it depends entirely on having
-observed the old history first. Once the server holds its own copy, that whole
-class of attack stops working, because a force-push cannot reach the server's
-database. Editing history locally now just makes the two copies disagree, and
-the server's copy is the one that counts.
+Why streaming rather than collecting and sending later: a record that is
+already on the server before the student has any reason to want it different
+cannot be revised afterwards. Everything on their machine can be. The gap
+between an edit happening and its record leaving the machine is the entire
+window in which the numbers can still be shaped, so the hook keeps that window
+as small as a debounce allows.
+
+What this buys, precisely: the student cannot change what was reported. It does
+not make what gets reported complete. Work done with no session open is never
+observed by anything, so it is never recorded, and no amount of delivery
+integrity recovers it. See the README's limits.
 
 What this hook is NOT allowed to do:
 
@@ -93,9 +97,9 @@ def deliver(ctx):
             reply = send_batch(ctx, records)
         except (urllib.error.URLError, urllib.error.HTTPError,
                 OSError, ValueError):
-            # Offline, server down, key rotated. All non-events: the ledger on
-            # disk is untouched and complete, the watermark has not moved, and
-            # the next session start picks up exactly where this left off.
+            # Offline, server down, key rotated. All non-events: the local
+            # ledger is untouched and complete, the watermark has not moved,
+            # and the next session start picks up exactly where this left off.
             outbox.mark_failure(rid)
             return
 

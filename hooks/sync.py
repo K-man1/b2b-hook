@@ -17,14 +17,14 @@ Three rules it must obey:
   1. Never block. Wired as an async hook and given a short timeout, because a
      student on hotel wifi must not wait on our HTTP call to close a session.
   2. Never raise. A missing endpoint, no network, a 500, an expired key: all
-     are non-events. Local tracking continues regardless and the ledger in the
-     repo remains the authoritative record.
+     are non-events. Local tracking continues regardless and the next session
+     start catches the reporting up.
   3. Never send content. Aggregates only. See registry.sync_payload.
 
-This channel is for convenience and visibility, NOT for integrity. Everything
-it sends originates on a machine the student controls, so the server must treat
-it as a claim. Trustworthy numbers come only from server-side verification of
-pushed git history.
+This channel is for convenience and visibility, NOT for integrity. It sends
+totals the student's own machine computed, so the server must treat them as a
+claim and label them that way. The records streamed by stream.py are the thing
+with evidentiary weight, because they were delivered as the work happened.
 """
 
 import json

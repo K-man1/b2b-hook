@@ -1,13 +1,22 @@
 """Append-only, hash-chained event log.
 
-Each record embeds the hash of the record before it, so the log can only be
-extended, never rewritten, without every subsequent hash going wrong. That
-alone is weak (a student holds the file and could recompute the whole chain),
-but the ledger is committed to their repo, so the instructor's verifier can
-check a much stronger property against git history: every committed version of
-this file must be a strict prefix of the next. See verifier/verify_repo.py.
+Each record embeds the hash of the record before it, and carries a sequence
+number assigned under a lock. Both are load-bearing, but not for the reason
+they originally were.
 
-Concurrency is a correctness requirement here, not a nicety. Claude issues tool
+The chain used to be a tamper-evidence mechanism, back when this file was
+committed to the student's repo and had to defend itself. It cannot do that job
+and never really could: the student holds the file and can recompute the whole
+chain. What it does now is give the server a way to tell a resend apart from a
+rewrite. Records arrive over the network, possibly out of order, possibly twice
+after a dropped connection; `seq` says where each one belongs and `hash` says
+whether the copy being offered matches the copy already stored. A record
+offered at a seq the server already holds, with a different hash, is the local
+stream having been edited between two deliveries.
+
+`seq` is also what the delivery watermark counts (see core/outbox.py).
+
+Concurrency is a correctness requirement, not a nicety. Claude issues tool
 calls in parallel, so several PostToolUse hooks can append at the same moment.
 An interleaved write would corrupt the chain, and a corrupt chain reads as
 tampering. Falsely accusing a student of cheating is the worst failure this

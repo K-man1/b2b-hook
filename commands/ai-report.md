@@ -20,5 +20,6 @@ If the user asks why a bucket looks wrong, the useful things to explain are:
   disk when tracking started, or added while no session was running.
 - Edits made outside a Claude session land in `human` only after the next
   session start, when the drift sweep runs.
-- The instructor's verifier computes a fourth bucket, `unattributed`, by
-  reconciling this ledger against real commit diffs. It is not visible here.
+- The plugin cannot tell hand-written code from code pasted in from elsewhere.
+  Both changed the file while nothing was watching, so both count as `human`.
+  If the user asks whether pasted code is detected, say plainly that it is not.
