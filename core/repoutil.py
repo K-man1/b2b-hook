@@ -54,6 +54,40 @@ _SKIP_DIRS = frozenset((
 # a real hang risk in, say, a home directory someone opened by accident.
 _MAX_WALK_FILES = 20_000
 
+# Directories that hold projects rather than being one. The folder-name fallback
+# is refused here, and ONLY there: a git repo or a .wakatime-project in one of
+# these is an explicit statement by the student and is honoured normally.
+#
+# This is a deliberate divergence from wakatime-cli, which happily falls back to
+# the folder name anywhere. The justification is that the two tools carry
+# different risk: wakatime-cli records that a folder called "User" existed,
+# while this takes content snapshots of every file it finds. Opening a home
+# directory once produced 12,139 snapshots totalling 56MB of personal files
+# before this guard existed, which is not a cost anyone opted into.
+_CONTAINER_DIRS = frozenset((
+    "Desktop", "Documents", "Downloads", "Music", "Pictures", "Movies",
+    "Public", "Library", "Applications", "Sites", "src", "code", "projects",
+    "repos", "dev", "workspace",
+))
+
+
+def _is_container(path):
+    """True for a directory that is somewhere projects live, not a project."""
+    path = os.path.realpath(path)
+    if os.path.dirname(path) == path:
+        return True  # filesystem root
+    home = os.path.realpath(os.path.expanduser("~"))
+    if path == home:
+        return True
+    for base in (home, "/", "/Users", "/home", "/tmp", "/var/tmp"):
+        try:
+            if os.path.dirname(path) == os.path.realpath(base) \
+                    and os.path.basename(path) in _CONTAINER_DIRS:
+                return True
+        except OSError:
+            continue
+    return False
+
 
 def _git(root, args, timeout=20):
     try:
@@ -122,9 +156,10 @@ def repo_root(start_dir):
     have called it, and honouring git anyway would file their work under a name
     their editor never uses.
 
-    The final fallback never returns None, so every directory is a project. That
-    is wakatime-cli's behaviour and it is why folders with no repository still
-    appear in a Hackatime project list.
+    The folder-name fallback is wakatime-cli's behaviour and is why folders with
+    no repository still appear in a Hackatime project list. It is refused for
+    the container directories above, which is the one place this deliberately
+    departs from them; see _CONTAINER_DIRS for why.
     """
     marker = marker_root(start_dir)
     if marker:
@@ -133,9 +168,10 @@ def repo_root(start_dir):
     if git:
         return git
     try:
-        return os.path.realpath(start_dir)
+        root = os.path.realpath(start_dir)
     except (OSError, ValueError):
         return None
+    return None if _is_container(root) else root
 
 
 def project_name(root):

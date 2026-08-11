@@ -340,6 +340,22 @@ def test_project_detection_matches_wakatime_cli():
               repoutil.repo_root(plain) == os.path.realpath(plain)
               and repoutil.project_name(plain) == "just-a-folder")
 
+        # ...but not for directories that hold projects rather than being one.
+        # Regression: opening a home directory made it a project and produced
+        # 12,139 content snapshots, 56MB, of personal files.
+        home = os.path.realpath(os.path.expanduser("~"))
+        check("a home directory is not a project", repoutil.repo_root(home) is None)
+        check("nor is a container inside it",
+              repoutil.repo_root(os.path.join(home, "Downloads")) is None
+              if os.path.isdir(os.path.join(home, "Downloads")) else True)
+
+        # An explicit marker overrides the guard: saying so is the whole point.
+        guarded = os.path.join(d, "Downloads")
+        os.makedirs(guarded)
+        open(os.path.join(guarded, ".wakatime-project"), "w").write("on-purpose\n")
+        check("an explicit marker still wins in a container-named folder",
+              repoutil.project_name(guarded) == "on-purpose")
+
         # 1st detector: the marker names the project and needs no git.
         marked = os.path.join(d, "marked")
         os.makedirs(marked)

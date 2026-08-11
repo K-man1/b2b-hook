@@ -23,6 +23,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _common as C  # noqa: E402
+from core import report as report_mod  # noqa: E402
 
 PENDING_MAX_AGE = 6 * 3600
 
@@ -207,6 +208,24 @@ def main():
                      C.repoutil.remote_url(ctx["root"]), path=ctx["root"])
 
     drifted, baselined, reset = sweep(ctx)
+
+    # Totals, here as well as at session end, and after the sweep so they
+    # include drift it just found.
+    #
+    # Computing them only at SessionEnd was a real bug with a real symptom: a
+    # student who worked and then submitted without closing Claude Code had a
+    # project entry carrying no totals at all, which the website rendered as
+    # 0% AI / 0% human / 0% unobserved. That reads as "the plugin saw nothing"
+    # when the truth is "nobody has added it up yet", and the two mean opposite
+    # things to a reviewer. Sessions do not reliably end; session start always
+    # happens. This is the same reasoning sync.py already applies to delivery,
+    # applied to the numbers being delivered.
+    data = report_mod.build(ctx["root"], ctx["rid"])
+    C.registry.update(ctx["rid"], ctx["name"],
+                      C.repoutil.remote_url(ctx["root"]),
+                      totals=data.get("totals"),
+                      band=report_mod.band(data.get("totals", {})),
+                      path=ctx["root"])
     fingerprint, disabled = settings_fingerprint(ctx["root"])
 
     C.emit(ctx, "attestation",
