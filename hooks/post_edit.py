@@ -79,6 +79,7 @@ def main(payload=None):
             C.emit(ctx, "baseline", path=rel, lines=len(after_lines),
                    reason="no_before_image",
                    after_sha256=C.provenance.sha256_text(after_text))
+            C.spawn_stream(ctx)
             return
         before_lines = snap.get("lines", [])
         before_tags = snap.get("tags", [])
@@ -108,6 +109,11 @@ def main(payload=None):
         C.heartbeat.record(ctx["rid"], ctx["name"], rel,
                            ai_lines=raw, session_id=ctx["session_id"],
                            branch=ctx["branch"], agent=ctx["agent"])
+        # Hand off to the streaming process now that the record is durable.
+        # Spawned rather than called: an HTTP request on the path of every tool
+        # call is exactly what this hook is not allowed to do. See spawn_stream
+        # for why this is not an async hook entry instead.
+        C.spawn_stream(ctx)
 
 
 if __name__ == "__main__":

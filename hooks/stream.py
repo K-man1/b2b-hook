@@ -42,7 +42,9 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _common as C  # noqa: E402
+import sync  # noqa: E402
 from core import config, heartbeat, outbox  # noqa: E402
+from core import report as report_mod  # noqa: E402
 
 TIMEOUT = 10
 
@@ -87,6 +89,7 @@ def deliver(ctx):
     """Send everything above the watermark, in batches, until caught up."""
     rid = ctx["rid"]
     outbox.mark_attempt(rid)
+    rewound = False
 
     while True:
         records, backlog = outbox.unsent(rid, ctx["ledger"])
@@ -110,14 +113,27 @@ def deliver(ctx):
             outbox.mark_failure(rid)
             return
 
-        # A gap means the server is missing records we believed we had sent,
-        # usually because the watermark survived a wiped server or the student
-        # restored an old plugin-data backup. Rewind and refill rather than
-        # leaving a hole: a hole in the server's copy is indistinguishable from
-        # deleted records at verification time.
+        # The server asking for a seq we believe we already delivered means its
+        # copy is missing records ours thinks it has: a wiped or restored
+        # server, a rotated repo key, an old plugin-data backup. Rewind and
+        # refill rather than leaving a hole -- a hole in the server's copy is
+        # indistinguishable from deleted records at verification time.
+        #
+        # Compared against our own watermark, not against next_seq. It used to
+        # test `expected < next_seq`, and those two are the same number in the
+        # exact case this branch exists to handle: an empty server answers
+        # next_seq 0, expected_seq 0, so the rewind never fired. Delivery then
+        # fell through to the `after <= before` guard below and marked a
+        # failure, forever, on every attempt -- the repo simply stopped
+        # reporting, with a failure count climbing past 100 as the only sign.
         expected = reply.get("expected_seq")
-        if isinstance(expected, int) and expected < next_seq:
-            outbox.mark_sent(rid, expected - 1)
+        current = outbox.state(rid)["sent_seq"]
+        if isinstance(expected, int) and expected <= current and not rewound:
+            # Once per delivery pass. Re-sending is free, but a server that
+            # answers with the same expectation after a refill would otherwise
+            # spin here, and this runs unattended.
+            rewound = True
+            outbox.rewind(rid, expected - 1)
             continue
 
         before = outbox.state(rid)["sent_seq"]
@@ -129,6 +145,43 @@ def deliver(ctx):
             return
         if backlog <= len(records):
             return
+
+
+def refresh(ctx):
+    """Recompute this repo's roll-up and report it to the website.
+
+    The picker on the website renders the roll-up, not the record stream, so a
+    project reads as 0% until this has run no matter how many records have been
+    delivered. It used to run at session start and session end only.
+
+    Session start is the reliable half of that pair, but it runs *before* the
+    work. So the first session in a fresh project reported zeros for its entire
+    length: a student who installed the plugin, wrote a file, and checked the
+    site was told "Only 0% of this project was tracked" while their own machine
+    held complete, correct numbers. That is the same wrong-in-the-worst-
+    direction failure session.py's comment already warns about -- the site says
+    the plugin saw nothing, when the truth is that nobody had added it up yet.
+
+    Runs here because this path is already detached and already debounced by
+    should_send. The other obvious home is post_edit.py, right next to the
+    write, but report.build re-walks and re-counts every tracked file in the
+    repo, and putting a full repo scan on every Write and Edit tool call is a
+    cost that grows with the project until students notice it.
+    """
+    data = report_mod.build(ctx["root"], ctx["rid"])
+    records, _bad = C.ledger.read_all(ctx["ledger"])
+    head = records[-1].get("hash", "") if records else ""
+    seq = int(records[-1].get("seq", -1)) if records else -1
+
+    C.registry.update(
+        ctx["rid"], ctx["name"],
+        C.repoutil.remote_url(ctx["root"]),
+        totals=data.get("totals"),
+        band=report_mod.band(data.get("totals", {})),
+        ledger_head=head, ledger_records=seq + 1,
+        path=ctx["root"],
+    )
+    sync.report()
 
 
 def main():
@@ -155,6 +208,13 @@ def main():
             return
 
     deliver(ctx)
+
+    # Edit mode only. The flush modes are already paired in hooks.json with
+    # session.py / session_end.py, which compute the same roll-up, and with
+    # sync.py, which posts it. Repeating it here would mean two full repo scans
+    # at every session boundary for one set of numbers.
+    if mode == "edit":
+        refresh(ctx)
 
 
 if __name__ == "__main__":

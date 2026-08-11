@@ -93,6 +93,27 @@ def mark_sent(rid, seq):
     return int(seq)
 
 
+def rewind(rid, seq):
+    """Force the watermark backwards, on the server's own say-so.
+
+    The only path allowed to lower it, and it exists because mark_sent refuses
+    to. That refusal is right as a default: a confused reply must never be able
+    to silently drop records. But it made recovery impossible in the one case
+    the recovery was written for. A server whose copy ends *before* our
+    watermark -- wiped and restored, re-keyed, or restored from a backup older
+    than the client's -- will not store records numbered above where its copy
+    ends, so every retry sends a batch it discards, the watermark never moves,
+    and the repo stops delivering permanently while the failure counter climbs.
+
+    Rewinding is the safe direction to be wrong in. Setting the watermark too
+    low costs duplicate sends, which the server drops. Setting it too high
+    loses records for good.
+    """
+    seq = int(seq)
+    _update(rid, sent_seq=seq, failures=0)
+    return seq
+
+
 def mark_failure(rid):
     _update(rid, failures=state(rid)["failures"] + 1)
 

@@ -13,6 +13,7 @@ Every hook in this plugin obeys two rules:
 
 import json
 import os
+import subprocess
 import sys
 import time
 import traceback
@@ -122,6 +123,64 @@ def emit(ctx, kind, **fields):
     }
     body.update(fields)
     return ledger.append(ctx["ledger"], body)
+
+
+def spawn_stream(ctx, mode="edit"):
+    """Kick off delivery, as a detached child, once a record is on disk.
+
+    Deliberately spawned from the code that writes the record rather than wired
+    as another PostToolUse hook. It was wired that way: a sibling of
+    post_edit.py carrying `async: true`. The two raced. An async hook is spawned
+    in parallel with its synchronous siblings, not after them, so the streaming
+    process read the ledger before post_edit.py had appended the record it
+    existed to send, saw an empty backlog, and returned early -- before even
+    marking a send attempt, which is why the failure left no trace anywhere.
+
+    The record then waited for the *next* edit to fire the hook again, and a
+    session containing a single edit delivered nothing at all until SessionEnd.
+    Calling from here makes the ordering structural instead of hopeful: the
+    append has already returned by the time this line runs.
+
+    Also the only reason the non-Claude adapters deliver anything. agent_hook.py
+    routes those tools straight into post_edit.main and never had a streaming
+    hook of its own to wire up.
+
+    Never blocks and never raises. A student on bad wifi must not wait on this,
+    and a machine that cannot spawn it is no worse off than one that is offline:
+    the local ledger is already complete, and the next flush catches up.
+    """
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "stream.py")
+    if not sys.executable or not os.path.exists(script):
+        return
+    # Reuse the interpreter already running, rather than re-running py.sh's
+    # discovery. This one is known to work: it is executing this function.
+    if os.name == "nt":
+        # DETACHED_PROCESS | CREATE_NEW_PROCESS_GROUP, so the child is not
+        # killed with the console the agent is running in.
+        extra = {"creationflags": 0x00000008 | 0x00000200}
+    else:
+        extra = {"start_new_session": True}
+    try:
+        child = subprocess.Popen(
+            [sys.executable, script, mode],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            **extra
+        )
+    except (OSError, ValueError):
+        return
+    # stream.py resolves its own context from the payload, exactly as it does
+    # when the hook system feeds it stdin. Small enough to never fill the pipe
+    # buffer, so this write cannot block.
+    try:
+        child.stdin.write(json.dumps({
+            "cwd": ctx["cwd"],
+            "session_id": ctx["session_id"],
+        }).encode("utf-8"))
+        child.stdin.close()
+    except (OSError, ValueError):
+        pass
 
 
 def read_file_state(ctx, rel):

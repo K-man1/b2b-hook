@@ -57,7 +57,13 @@ def post(url, body, key):
         return resp.status
 
 
-def main():
+def report():
+    """Post the current index. Separate from main() so stream.py can reuse it.
+
+    Session start and session end are not the only moments the website's
+    numbers need refreshing; mid-session delivery needs it too, and it needs
+    exactly this, not a second copy of it that can drift.
+    """
     if not config.sync_enabled():
         return  # purely local install, nothing to do
 
@@ -73,6 +79,10 @@ def main():
         # record that matters and it is already on disk. Reporting catches up
         # on the next session.
         pass
+
+
+def main():
+    report()
 
 
 if __name__ == "__main__":
