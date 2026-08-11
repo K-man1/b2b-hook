@@ -27,11 +27,6 @@ written there.
 import hashlib
 import os
 
-# Legacy. Repos tracked by an older version still have a committed .aiattr/
-# directory; nothing reads it any more, but counting.EXCLUDE_GLOBS still drops
-# it so an abandoned ledger is never counted as authored code.
-LEGACY_LEDGER_DIRNAME = ".aiattr"
-
 
 def plugin_data_dir():
     """Persistent state directory. Deliberately NOT ${CLAUDE_PLUGIN_DATA}.

@@ -184,39 +184,8 @@ def read_all(ledger_file):
     return records, bad
 
 
-def verify_chain(records):
-    """Check hash linkage and sequence continuity.
-
-    Returns [] when intact, otherwise one problem dict per break. Reports every
-    break rather than stopping at the first, since the pattern of breaks is
-    what distinguishes a single edited record from a wholesale rewrite.
-    """
-    problems = []
-    prev = GENESIS
-    for idx, rec in enumerate(records):
-        claimed = rec.get("hash")
-        body = {k: v for k, v in rec.items() if k != "hash"}
-        actual = record_hash(body)
-        if claimed != actual:
-            problems.append({
-                "index": idx,
-                "seq": rec.get("seq"),
-                "kind": "hash_mismatch",
-                "detail": "record contents do not match its own hash",
-            })
-        if rec.get("prev_hash") != prev:
-            problems.append({
-                "index": idx,
-                "seq": rec.get("seq"),
-                "kind": "chain_break",
-                "detail": "prev_hash does not match the preceding record",
-            })
-        if rec.get("seq") != idx:
-            problems.append({
-                "index": idx,
-                "seq": rec.get("seq"),
-                "kind": "seq_gap",
-                "detail": "expected seq {}, found {}".format(idx, rec.get("seq")),
-            })
-        prev = claimed if claimed else record_hash(body)
-    return problems
+# Chain verification deliberately does not live here. The client has no reason
+# to audit a chain it wrote itself, and the copy that matters is the server's:
+# it compares an offered record against the one already stored at that seq, so
+# the check belongs where the two copies meet. `record_hash` and `canonical`
+# above are what the server needs to reproduce, and both are pinned by tests.

@@ -190,20 +190,11 @@ def main():
     payload = C.read_input()
     ctx = C.context(payload)
     if ctx is None:
-        # Ignored repos are a deliberate choice, so stay quiet about them.
-        # A missing git repo is a problem the student should hear about:
-        # anything written before `git init` is invisible to the plugin
-        # forever, and a student who only finds that out at the end looks like
-        # they disabled tracking when they simply started work in a plain
-        # directory.
-        if C.skip_reason(payload) == "no_repo":
-            print(json.dumps({
-                "systemMessage": "AI attribution: this folder is not a git "
-                                 "repository, so no code authorship is being "
-                                 "recorded. Run `git init` before starting "
-                                 "work, or anything written now will go "
-                                 "untracked."
-            }))
+        # The only way to get here now is an opt-out, which is a deliberate
+        # choice, so stay quiet about it. There used to be a warning here for
+        # folders that were not git repositories; wakatime-cli falls back to the
+        # folder name rather than refusing, this now does the same, and so the
+        # case the warning existed for cannot happen.
         return
 
     migrate_legacy()
@@ -212,7 +203,7 @@ def main():
     # Register this repo so it appears in the student's project picker, even if
     # the session produces no edits. Working in a folder is what makes it a
     # candidate project, not whether Claude happened to write anything.
-    C.registry.touch(ctx["rid"], os.path.basename(ctx["root"]),
+    C.registry.touch(ctx["rid"], ctx["name"],
                      C.repoutil.remote_url(ctx["root"]), path=ctx["root"])
 
     drifted, baselined, reset = sweep(ctx)

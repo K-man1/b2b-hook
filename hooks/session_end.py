@@ -56,15 +56,22 @@ def main():
 
     # Keep the project index current so the picker shows real numbers without
     # having to re-scan every repo on the student's disk.
+    # The band travels with the totals rather than being recomputed server-side,
+    # so the label a student sees and the numbers a reviewer sees can never
+    # disagree about which side of a threshold a project falls on.
+    band = report_mod.band(data.get("totals", {}))
+
     C.registry.update(
-        ctx["rid"], os.path.basename(ctx["root"]),
+        ctx["rid"], ctx["name"],
         C.repoutil.remote_url(ctx["root"]),
-        totals=data.get("totals"), ledger_head=head, ledger_records=seq + 1,
+        totals=data.get("totals"), band=band,
+        ledger_head=head, ledger_records=seq + 1,
         path=ctx["root"],
     )
 
     C.emit(ctx, "session_end",
            ledger_head=head, ledger_seq=seq,
+           band=band["level"], ai_pct_of_observed=band["ai_pct_of_observed"],
            **totals_summary(data))
 
 

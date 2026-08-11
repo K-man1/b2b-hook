@@ -76,19 +76,31 @@ def test_significant_lines():
 
 # --- ledger ---------------------------------------------------------------
 
-def test_chain_detects_tampering():
+def test_chain_is_linked_and_reproducible():
+    """The shape the server relies on to compare its copy against an offer.
+
+    Verification itself is the server's job (see core/ledger.py), so what has to
+    hold here is only that appends produce a chain it can reproduce: sequential
+    seq, each prev_hash pointing at the record before, and every hash derivable
+    from the record body alone.
+    """
     import tempfile
     with tempfile.TemporaryDirectory() as d:
         path = os.path.join(d, "ledger.jsonl")
         for i in range(4):
             ledger.append(path, {"kind": "edit", "lines_ai": i})
-        recs, _ = ledger.read_all(path)
-        check("clean chain verifies", ledger.verify_chain(recs) == [])
+        recs, bad = ledger.read_all(path)
 
-        recs[1]["lines_ai"] = 999
-        problems = ledger.verify_chain(recs)
-        check("edited record is caught",
-              any(p["kind"] == "hash_mismatch" for p in problems), str(problems))
+        check("every record parses", bad == [] and len(recs) == 4)
+        check("seq is sequential", [r["seq"] for r in recs] == [0, 1, 2, 3])
+        check("each record links to the one before",
+              all(recs[i]["prev_hash"] == recs[i - 1]["hash"]
+                  for i in range(1, len(recs)))
+              and recs[0]["prev_hash"] == ledger.GENESIS)
+        check("hash is derivable from the body alone",
+              all(r["hash"] == ledger.record_hash(
+                  {k: v for k, v in r.items() if k != "hash"})
+                  for r in recs))
 
 
 def test_opt_out_is_not_reported():
@@ -306,14 +318,129 @@ def test_a_resend_is_distinguishable_from_a_rewrite():
               and by_seq[rewritten["seq"]] != rewritten["hash"])
 
 
+def test_project_detection_matches_wakatime_cli():
+    """Detector order copied from wakatime-cli: marker, then VCS, then folder.
+
+    The order is the point. If this plugin and the student's editor plugin
+    disagree about a project's name, the same work arrives at Hackatime under
+    two names and neither number means anything. Regression: this used to
+    require git and give up otherwise, which silently recorded nothing for a
+    student in a plain folder while Hackatime still counted their hours.
+    """
+    import subprocess
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        # 3rd detector: a bare folder is still a project, named for itself.
+        # wakatime-cli falls back rather than refusing, which is why folders
+        # with no repository show up in a Hackatime project list.
+        plain = os.path.join(d, "just-a-folder")
+        os.makedirs(plain)
+        open(os.path.join(plain, "a.py"), "w").write("x = 1\n")
+        check("a bare folder is a project, by folder name",
+              repoutil.repo_root(plain) == os.path.realpath(plain)
+              and repoutil.project_name(plain) == "just-a-folder")
+
+        # 1st detector: the marker names the project and needs no git.
+        marked = os.path.join(d, "marked")
+        os.makedirs(marked)
+        open(os.path.join(marked, ".wakatime-project"), "w").write("green-monkeys\n")
+        open(os.path.join(marked, "page.html"), "w").write("<html>\n")
+        check("a .wakatime-project names the project",
+              repoutil.project_name(marked) == "green-monkeys")
+        check("its files are found without git",
+              "page.html" in repoutil.tracked_files(marked))
+
+        sub = os.path.join(marked, "src", "deep")
+        os.makedirs(sub)
+        check("the marker is found walking up from a subdirectory",
+              repoutil.repo_root(sub) == os.path.realpath(marked))
+
+        # 2nd detector: git, named for its folder.
+        repo = os.path.join(d, "my-repo")
+        os.makedirs(repo)
+        subprocess.run(["git", "init", "-q"], cwd=repo, capture_output=True)
+        check("a git repo is named for its folder",
+              repoutil.repo_root(repo) == os.path.realpath(repo)
+              and repoutil.project_name(repo) == "my-repo")
+
+        # Regression: plain `git ls-files` lists only the index, so a repo with
+        # no commits yet returned nothing and every report read zero while the
+        # ledger was recording edits normally.
+        open(os.path.join(repo, "uncommitted.py"), "w").write("x = 1\n")
+        open(os.path.join(repo, ".gitignore"), "w").write("secret/\n")
+        os.makedirs(os.path.join(repo, "secret"))
+        open(os.path.join(repo, "secret", "keys.txt"), "w").write("nope\n")
+        listed = repoutil.tracked_files(repo)
+        check("uncommitted files are still counted",
+              "uncommitted.py" in listed)
+        check(".gitignore is still honoured",
+              not any(f.startswith("secret/") for f in listed), str(listed))
+
+        # Order: the marker is checked BEFORE git, because it exists to
+        # override what git would otherwise have called the project.
+        open(os.path.join(repo, ".wakatime-project"), "w").write("chosen\nmy-branch\n")
+        check("the marker beats git on the project name",
+              repoutil.project_name(repo) == "chosen")
+        check("line 2 of the marker sets the branch",
+              repoutil.project_branch(repo) == "my-branch")
+
+        # A marker deeper than the git root wins, and moves the root with it.
+        nested = os.path.join(repo, "packages", "widget")
+        os.makedirs(nested)
+        open(os.path.join(nested, ".wakatime-project"), "w").write("widget\n")
+        check("a nested marker overrides the enclosing repo",
+              repoutil.repo_root(nested) == os.path.realpath(nested))
+
+
+def test_band_is_measured_against_observed_code():
+    """High/Moderate/Low, over ai+human only, and honest when coverage is thin.
+
+    The denominator is the whole point. Scoring AI against every line in the
+    project would report a repo that was 90% written before tracking started as
+    barely-any-AI, when in fact nobody knows what that 90% was.
+    """
+    from core import report as report_mod
+
+    def totals(ai, human, unobserved):
+        return {"ai": {"sig": ai, "raw": ai},
+                "human": {"sig": human, "raw": human},
+                "unobserved": {"sig": unobserved, "raw": unobserved}}
+
+    check("60% of observed reads high",
+          report_mod.band(totals(60, 40, 0))["level"] == "high")
+    check("20% of observed reads low",
+          report_mod.band(totals(20, 80, 0))["level"] == "low")
+    check("the middle reads moderate",
+          report_mod.band(totals(40, 60, 0))["level"] == "moderate")
+
+    # The denominator check: 100 AI lines beside 900 unobserved is still a
+    # heavily-AI project among the code anyone actually watched.
+    b = report_mod.band(totals(100, 20, 900))
+    check("unobserved lines stay out of the ratio",
+          b["ai_pct_of_observed"] == round(100 * 100 / 120.0, 1))
+
+    # ...but coverage that thin has to be visible, not silently folded in.
+    check("thin coverage is reported alongside it",
+          b["observed_pct_of_project"] == round(100 * 120 / 1020.0, 1))
+
+    check("a barely-tracked project refuses to be labelled",
+          report_mod.band(totals(3, 0, 5000))["level"] == "unknown")
+    check("so does one with too few observed lines",
+          report_mod.band(totals(2, 1, 0))["level"] == "unknown")
+    check("an empty project does not divide by zero",
+          report_mod.band(totals(0, 0, 0))["level"] == "unknown")
+
+
 def main():
     import json as _json
     globals()["json"] = _json
+    print("project detection");     test_project_detection_matches_wakatime_cli()
     print("provenance");            test_carry_forward()
     print("line counting");         test_no_phantom_line(); test_significant_lines()
-    print("ledger integrity");      test_chain_detects_tampering()
+    print("ledger integrity");      test_chain_is_linked_and_reproducible()
     print("                ");      test_a_resend_is_distinguishable_from_a_rewrite()
     print("report");                test_report_survives_an_edit_outside_a_session()
+    print("ai usage band");         test_band_is_measured_against_observed_code()
     print("streaming outbox");      test_watermark_only_advances_on_acknowledgement()
     print("                 ");     test_debounce_lets_backlog_through()
     print("privacy / opt-out");     test_opt_out_is_not_reported(); test_remote_credentials_stripped()

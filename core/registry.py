@@ -65,7 +65,7 @@ def remove(rid):
     return False
 
 
-def update(rid, name, remote, totals=None, ledger_head=None,
+def update(rid, name, remote, totals=None, band=None, ledger_head=None,
            ledger_records=None, path=None):
     """Upsert one repo's entry. Locked, because hooks run concurrently.
 
@@ -85,6 +85,8 @@ def update(rid, name, remote, totals=None, ledger_head=None,
             entry["remote"] = remote
         if totals is not None:
             entry["totals"] = totals
+        if band is not None:
+            entry["band"] = band
         if ledger_head is not None:
             entry["ledger_head"] = ledger_head
         if ledger_records is not None:
@@ -139,6 +141,10 @@ def sync_payload(student_id, client_version):
                 "first_seen": p.get("first_seen"),
                 "last_activity": p.get("last_activity"),
                 "totals": p.get("totals"),
+                # Exact counts for the reviewer, coarse label for the student.
+                # Both travel: the website decides who sees which, and never
+                # has to derive one from the other.
+                "band": p.get("band"),
                 "ledger_head": p.get("ledger_head"),
                 "ledger_records": p.get("ledger_records"),
             }

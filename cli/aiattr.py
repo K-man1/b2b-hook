@@ -2,6 +2,7 @@
 
     python3 cli/aiattr.py status
     python3 cli/aiattr.py configure --key KEY --endpoint URL --student-id ID
+    python3 cli/aiattr.py configure --enable-hackatime
     python3 cli/aiattr.py projects
     python3 cli/aiattr.py ignore /path/to/personal-repo
     python3 cli/aiattr.py sync
@@ -34,6 +35,17 @@ def cmd_status(_args):
         "set, ending " + key[-4:] if len(key) >= 4 else "(not set)"))
     print("  reporting  : {}".format(
         "on" if config.sync_enabled() else "off (tracking locally only)"))
+
+    # Reported separately from `reporting` because the two are independent
+    # channels: this one goes to the student's own Hackatime account using the
+    # key already in ~/.wakatime.cfg, and works even with no course server set.
+    from core import heartbeat
+    if heartbeat.enabled():
+        print("  hackatime  : on (agent edits sent as 'ai coding')")
+    elif (cfg.get("hackatime") or {}).get("enabled"):
+        print("  hackatime  : on, but no key found in ~/.wakatime.cfg")
+    else:
+        print("  hackatime  : off")
     ignored = cfg.get("ignore") or []
     print("  ignored    : {}".format(len(ignored)))
     for p in ignored:
@@ -74,6 +86,10 @@ def cmd_configure(args):
         cfg["sync"] = False
     if args.enable_sync:
         cfg["sync"] = True
+    if args.enable_hackatime or args.disable_hackatime:
+        ht = dict(cfg.get("hackatime") or {})
+        ht["enabled"] = bool(args.enable_hackatime)
+        cfg["hackatime"] = ht
     path = config.save(cfg)
     print("Wrote {}".format(path))
     return cmd_status(args)
@@ -127,12 +143,18 @@ def cmd_ignore(args):
     # out of a personal repo would still send its name and remote to the
     # server.
     if not args.remove:
+        from core import heartbeat as _heartbeat
         from core import outbox as _outbox
         from core import paths as _paths
         rid = _paths.repo_id(target)
         if registry.remove(rid):
             print("Removed it from your project index as well.")
         _outbox.forget(rid)
+        # Undelivered Hackatime buckets are the same hazard as a stale index
+        # entry: they still carry the project name and its line counts, and
+        # would be sent on the next flush.
+        if _heartbeat.forget(rid):
+            print("Discarded its undelivered Hackatime heartbeats.")
         # Drop the local record stream too. Leaving it would keep undelivered
         # records for a repo the student just said is none of our business.
         try:
@@ -203,6 +225,10 @@ def main():
     c.add_argument("--student-id")
     c.add_argument("--disable-sync", action="store_true")
     c.add_argument("--enable-sync", action="store_true")
+    c.add_argument("--enable-hackatime", action="store_true",
+                   help="send the AI/human line split to your Hackatime "
+                        "account, using the key in ~/.wakatime.cfg")
+    c.add_argument("--disable-hackatime", action="store_true")
 
     p = sub.add_parser("projects", help="list tracked repositories")
     p.add_argument("--json", action="store_true")

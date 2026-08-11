@@ -60,6 +60,9 @@ EXCLUDE_GLOBS = (
     # The ledger, and the settings file that enables this plugin, must never be
     # counted as authored code. Counting our own plumbing inflates the
     # denominator with lines nobody wrote.
+    # Legacy: ai-attribution < 0.6.0 committed a ledger into the repo. Nothing
+    # reads it now, but a still-installed old build can re-create it, so it
+    # stays excluded to keep an abandoned ledger out of the line counts.
     ".aiattr/*", "*/.aiattr/*",
     ".claude/*", "*/.claude/*",
     # Binaries and assets: line counts are meaningless.

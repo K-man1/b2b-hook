@@ -94,6 +94,12 @@ def main():
                lines_removed=removed,
                file_lines=len(after_lines),
                after_sha256=digest)
+        # Accumulate only. Delivery happens on the streaming hook, which is
+        # already async; an HTTP call from here would put the network on the
+        # path of every tool call.
+        C.heartbeat.record(ctx["rid"], ctx["name"], rel,
+                           ai_lines=raw, session_id=ctx["session_id"],
+                           branch=ctx["branch"])
 
 
 if __name__ == "__main__":

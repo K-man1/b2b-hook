@@ -9,6 +9,11 @@ Computed from local snapshots, so it describes current file state rather than a
 sum of past events. That matters: rewriting the same file ten times produces ten
 edit records but one final set of lines, and the honest question is who wrote
 the lines that are actually there now.
+
+Nothing here renders. The text report and its percentage table lived here to
+back a `/ai-report` slash command that no longer exists: students see a coarse
+band on the website and reviewers see the exact totals there too, so a local
+renderer would only be a third place for those numbers to disagree.
 """
 
 import os
@@ -86,54 +91,68 @@ def build(root, rid):
     }
 
 
-def percentages(totals, basis="sig"):
-    """Percent of counted lines per tag. `basis` is "sig" or "raw"."""
-    denom = sum(v[basis] for v in totals.values())
-    if denom == 0:
-        return {t: 0.0 for t in totals}, 0
-    return {t: round(100.0 * v[basis] / denom, 1) for t, v in totals.items()}, denom
+# --- banding --------------------------------------------------------------
+#
+# The coarse label a student sees, defined here rather than in the website so
+# that one set of thresholds governs everything. A server recomputing them from
+# raw totals would drift the moment either side was edited, and two different
+# answers to "is this high" is worse than either answer alone.
+#
+# Reviewers get the exact figures regardless; the band never replaces them.
+
+BAND_HIGH = 60.0        # at or above this share of observed code: "high"
+BAND_LOW = 20.0         # at or below: "low"
+
+# Below either of these the ratio is not worth stating. A project the plugin
+# barely watched can read as 100% AI off three observed lines, and showing a
+# student "High" on that basis would be a straightforward falsehood.
+MIN_OBSERVED_PCT = 20.0
+MIN_OBSERVED_LINES = 25
+
+BAND_LABELS = {
+    "high": "High",
+    "moderate": "Moderate",
+    "low": "Low",
+    "unknown": "Not enough tracked",
+}
 
 
-def format_text(report):
-    """Human-readable summary for the /ai-attribution:ai-report command."""
-    totals = report["totals"]
-    sig_pct, sig_total = percentages(totals, "sig")
-    raw_pct, raw_total = percentages(totals, "raw")
-    cov = report["coverage"]
+def band(totals, basis="sig"):
+    """Coarse AI-usage label, plus the numbers behind it.
 
-    out = []
-    out.append("AI attribution report")
-    out.append("=" * 52)
-    out.append("")
-    out.append("{:<14} {:>10} {:>8} {:>10} {:>8}".format(
-        "", "significant", "%", "raw", "%"))
-    for tag in provenance.ALL_TAGS:
-        out.append("{:<14} {:>10} {:>7}% {:>10} {:>7}%".format(
-            tag, totals[tag]["sig"], sig_pct.get(tag, 0.0),
-            totals[tag]["raw"], raw_pct.get(tag, 0.0)))
-    out.append("{:<14} {:>10} {:>8} {:>10}".format("total", sig_total, "", raw_total))
-    out.append("")
-    out.append("files counted {}, skipped {} (generated/binary/excluded), "
-               "never observed {}".format(
-                   cov["files_counted"], cov["files_skipped"],
-                   cov["files_never_observed"]))
-    if cov.get("files_drifted"):
-        out.append("{} file(s) changed since the plugin last saw them; those "
-                   "changes count as yours.".format(cov["files_drifted"]))
-    out.append("")
-    out.append("'unobserved' means the plugin never saw those lines written:")
-    out.append("they were on disk before tracking started, or added while no")
-    out.append("session was open. Lines you changed between sessions show as")
-    out.append("'human' once the next session start sweeps for them.")
+    Measured against *observed* code (ai + human), not against every line in the
+    project. Including `unobserved` in the denominator answers a different
+    question: it would report a repo that was 90% written before tracking began
+    as barely-any-AI, when the truth is that nobody knows what that 90% was.
 
-    if report["files"]:
-        out.append("")
-        out.append("Largest files:")
-        for f in report["files"][:10]:
-            t = f["tags"]
-            out.append("  {:<40} {:>5}L  ai={} human={} unobs={}".format(
-                f["path"][:40], f["lines"],
-                t.get("ai", {}).get("raw", 0),
-                t.get("human", {}).get("raw", 0),
-                t.get("unobserved", {}).get("raw", 0)))
-    return "\n".join(out)
+    Returns level, label, the percentage, and the coverage that percentage rests
+    on, so a reviewer can see at a glance whether to believe it.
+    """
+    ai = totals.get("ai", {}).get(basis, 0)
+    human = totals.get("human", {}).get(basis, 0)
+    unobserved = totals.get("unobserved", {}).get(basis, 0)
+
+    observed = ai + human
+    counted = observed + unobserved
+    observed_pct = round(100.0 * observed / counted, 1) if counted else 0.0
+    ai_pct = round(100.0 * ai / observed, 1) if observed else 0.0
+
+    if observed < MIN_OBSERVED_LINES or observed_pct < MIN_OBSERVED_PCT:
+        level = "unknown"
+    elif ai_pct >= BAND_HIGH:
+        level = "high"
+    elif ai_pct <= BAND_LOW:
+        level = "low"
+    else:
+        level = "moderate"
+
+    return {
+        "level": level,
+        "label": BAND_LABELS[level],
+        "ai_pct_of_observed": ai_pct,
+        "observed_pct_of_project": observed_pct,
+        "observed_lines": observed,
+        "counted_lines": counted,
+        "basis": basis,
+        "thresholds": {"high": BAND_HIGH, "low": BAND_LOW},
+    }

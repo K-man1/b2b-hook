@@ -19,10 +19,8 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import (config, counting, ledger, paths,  # noqa: E402
-                  provenance, registry, repoutil)
-
-VERSION = "0.6.0"
+from core import (VERSION, config, counting, heartbeat,  # noqa: E402,F401
+                  ledger, paths, provenance, registry, repoutil)
 
 
 def read_input():
@@ -39,13 +37,16 @@ def now_iso():
 
 
 def context(payload):
-    """Resolve repo context, or None when there is nothing to track.
+    """Resolve project context, or None when there is nothing to track.
 
-    Still gated on being inside a git work tree, even though git is no longer
-    the transport. A repo is the unit the student picks in the project list,
-    and repo_id is what namespaces both the record stream and the snapshots.
-    Tracking a bare directory would produce work that can never be attached to
-    anything they submit.
+    Project resolution follows wakatime-cli's detector order, so any folder the
+    student's editor is already reporting time for is a folder this attributes
+    code in. Since that order ends in a folder-name fallback, the only way to
+    get None here now is an opt-out.
+
+    `name` and `branch` are resolved once, here, because they must be identical
+    everywhere they are reported. The same work filed under two spellings would
+    land as two projects on Hackatime.
     """
     cwd = payload.get("cwd") or os.getcwd()
     root = repoutil.repo_root(cwd)
@@ -61,23 +62,25 @@ def context(payload):
         "cwd": cwd,
         "root": root,
         "rid": rid,
+        "name": repoutil.project_name(root),
+        "branch": repoutil.project_branch(root),
         "ledger": paths.ledger_path(rid),
         "session_id": payload.get("session_id", ""),
     }
 
 
 def skip_reason(payload):
-    """Why context() declined, so callers can say something accurate.
+    """Why context() declined. Effectively always "ignored" now.
 
-    Both cases return None from context(), but they mean opposite things to a
-    student: "not a repo" is a problem they should fix, "ignored" is a choice
-    they made. Telling someone their repo is not a git repository because they
-    opted out of it is just wrong.
+    repo_root falls back to the directory itself, matching wakatime-cli, so
+    "this is not a project" is no longer a state a student can be in. The
+    unresolvable case is kept only because a filesystem error can still make a
+    path unreadable, and reporting that as an opt-out would be a lie.
     """
     cwd = payload.get("cwd") or os.getcwd()
     root = repoutil.repo_root(cwd)
     if not root:
-        return "no_repo"
+        return "unresolvable"
     if config.is_ignored(root):
         return "ignored"
     return None
@@ -161,6 +164,9 @@ def sync_drift(ctx, rel, current_text, current_lines):
         emit(ctx, "drift", path=rel,
              lines_human=raw, sig_human=sig, lines_removed=removed,
              after_sha256=digest)
+        heartbeat.record(ctx["rid"], ctx["name"], rel,
+                         human_lines=raw, session_id=ctx["session_id"],
+                         branch=ctx["branch"])
     return current_lines, tags
 
 

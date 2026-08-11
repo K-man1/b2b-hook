@@ -42,7 +42,7 @@ import urllib.request
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _common as C  # noqa: E402
-from core import config, outbox  # noqa: E402
+from core import config, heartbeat, outbox  # noqa: E402
 
 TIMEOUT = 10
 
@@ -74,7 +74,7 @@ def send_batch(ctx, records):
         "student_id": config.student_id(),
         "repo": {
             "key": ctx["rid"],
-            "name": os.path.basename(ctx["root"]),
+            "name": ctx["name"],
             "remote": C.repoutil.remote_url(ctx["root"]),
         },
         "records": records,
@@ -137,6 +137,13 @@ def main():
     ctx = C.context(payload)
     if ctx is None:
         return
+
+    # Independent of sync_enabled: Hackatime delivery is the student's own
+    # account and their own key, and works on an install that reports to no
+    # course server at all. Rate-limited internally in `edit` mode, which fires
+    # on every tool call; the once-per-session flushes are not.
+    heartbeat.flush(force=(mode != "edit"))
+
     if not config.sync_enabled():
         return  # purely local install; tracking continues, nothing is sent
 
