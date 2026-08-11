@@ -1,0 +1,57 @@
+{
+  "name": "ai-attribution",
+  "displayName": "AI Attribution",
+  "description": "Records how much of your code was typed and how much appeared, and reports the split to Hackatime.",
+  "version": "0.1.0",
+  "publisher": "back-to-basics",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "configuration": {
+      "title": "AI Attribution",
+      "properties": {
+        "aiAttribution.enabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Send the typed/appeared line split to your Hackatime account. Off until you turn it on."
+        },
+        "aiAttribution.apiKey": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Hackatime API key. Leave blank to use the one already in `~/.wakatime.cfg`."
+        },
+        "aiAttribution.apiUrl": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Hackatime API base URL. Leave blank to use `~/.wakatime.cfg`, then the Hack Club default."
+        },
+        "aiAttribution.debug": {
+          "type": "boolean",
+          "default": false,
+          "description": "Log every classified change and every delivery to the AI Attribution output channel."
+        }
+      }
+    },
+    "commands": [
+      {
+        "command": "aiAttribution.showStatus",
+        "title": "AI Attribution: Show Status"
+      }
+    ]
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "vscode:prepublish": "npm run compile"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,87 @@
+// Deciding whether text was typed or simply appeared.
+//
+// This extension cannot see which agent produced an edit, and it does not try.
+// Cursor, Windsurf, Trae, Antigravity, Kiro and Qoder are all VS Code forks
+// with closed agent internals; the one thing every one of them shares is that
+// text ends up in a TextDocument. So the question asked here is narrower and
+// answerable:
+//
+//     did a human's fingers produce these characters, or did they arrive whole?
+//
+// That is a genuinely different measurement from the Claude Code plugin's,
+// which observes tool calls and therefore knows the author. This knows only
+// that nobody typed it. Pasting from a browser and an agent writing a file are
+// indistinguishable here, and the wording everywhere downstream has to keep
+// saying so.
+//
+// The signal is the shape of a single change event. Typing arrives one
+// character at a time because that is how keyboards work. Anything that
+// materialises a paragraph in one event was not typed, whatever produced it.
+
+export type Origin = "typed" | "appeared";
+
+export interface Classified {
+  origin: Origin;
+  linesAdded: number;
+  linesRemoved: number;
+  chars: number;
+}
+
+// A single event inserting at least this much is not someone typing. Both
+// thresholds are deliberately generous: over-calling "appeared" is the error
+// that accuses an honest student, so the bar sits well above any plausible
+// keystroke, IME commit, or emoji.
+//
+// 120 characters is roughly two full lines of code. A fast typist produces
+// about 10 characters per event at most, and VS Code coalesces at the keystroke
+// level rather than batching a burst into one change.
+const APPEARED_CHARS = 120;
+
+// ...or spans this many newlines. Length alone misses a short multi-line
+// snippet, which is exactly the shape of most generated code.
+const APPEARED_NEWLINES = 2;
+
+function countNewlines(text: string): number {
+  let n = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) n++;
+  }
+  return n;
+}
+
+// One VS Code content change, already narrowed to what matters. Kept as a
+// plain shape rather than importing vscode's type so this file stays testable
+// without the editor host.
+export interface RawChange {
+  text: string;
+  rangeLength: number;
+  rangeLines: number; // lines spanned by the replaced range
+}
+
+export function classify(change: RawChange): Classified {
+  const newlines = countNewlines(change.text);
+  const chars = change.text.length;
+
+  const appeared =
+    chars >= APPEARED_CHARS || newlines >= APPEARED_NEWLINES;
+
+  return {
+    origin: appeared ? "appeared" : "typed",
+    linesAdded: newlines,
+    linesRemoved: change.rangeLines,
+    chars,
+  };
+}
+
+// Whole-document replacements are their own case and must never be scored.
+//
+// They happen when a file is reverted, reloaded from disk after an external
+// write, or reformatted wholesale. Counting one as "appeared" would credit the
+// entire file to an agent every time a formatter ran, which is the single
+// easiest way to make this tool produce a number nobody believes.
+export function isWholeDocumentReplace(
+  change: RawChange,
+  documentLength: number,
+): boolean {
+  return change.rangeLength >= documentLength && documentLength > 0;
+}
