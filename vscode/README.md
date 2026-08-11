@@ -3,33 +3,47 @@
 Records how much of your code you typed and how much appeared, and reports the
 split to [Hackatime](https://hackatime.hackclub.com) on your normal heartbeats.
 
-**One extension, ten editors.** Cursor, Windsurf, Trae, Antigravity, Kiro,
-Qoder, VSCodium, Positron and code-server are all VS Code forks, so they all run
-this. It reports itself under the real editor's name, so a Cursor heartbeat says
-`cursor`.
-
 ---
 
-## What it actually measures
+## Read this before installing it
 
-**Whether text was typed, not who wrote it.**
+**This is not an agent hook, and for most agents a hook is the better tool.**
 
-These editors keep their agent internals closed, so nothing here can see which
-assistant produced an edit, and it never claims to. What it can see is the shape
-of a change: typing arrives one character at a time because that is how
-keyboards work, while a generated block materialises whole.
+An agent hook runs inside the agent, fires on its tool calls, and therefore
+*knows* the author: "this agent's edit tool wrote these 40 lines." Cursor,
+Windsurf, Antigravity, Kiro, Qoder, Codex, Gemini CLI, Qwen Code, Copilot,
+Cline, Devin and Goose all support one — see `core/adapters.py`, which
+generates the config for each. **If your agent is on that list, install the
+hook and skip this.**
 
-- `human_line_changes` — keystrokes were observed
-- `ai_line_changes` — lines appeared without them
+This extension runs in the editor instead and answers a narrower question:
 
-**A paste from a browser and an agent writing a file look identical here**, and
-both land in `ai_line_changes`. That is a real limit, not a rounding error. If
-you show these numbers to anyone, say so.
+> was this text typed, or did it appear whole?
 
-The companion [Claude Code plugin](../README.md) is stronger where it applies:
-it observes tool calls directly, so it knows the author rather than inferring
-it. Run both if you use Claude Code — they agree on project names and neither
-double-counts your time.
+Typing arrives one character at a time because that is how keyboards work. A
+generated block materialises. So `human_line_changes` means keystrokes were
+observed and `ai_line_changes` means they were not — which covers an agent
+writing a file *and* a paste from a browser, with no way to tell them apart.
+
+## So what is it actually for
+
+**Pasted code.** No agent hook can see a paste, because no agent acted. A
+student who copies AI output from a browser into their editor is invisible to
+every hook in `adapters.py` and visible here. That is the one gap hooks
+structurally cannot cover.
+
+**Agents with no hook surface.** Trae, Roo Code and Cody have no shell-command
+hook at all (verified against their docs, not inferred from silence). For those,
+this is the only observation available.
+
+**Belt and braces.** It runs alongside a hook without double-counting: buckets
+holding only typed lines are never sent, and both producers tag heartbeats
+`ai coding`, so neither adds to your paid hours.
+
+It reports itself under the real editor's name, so a Cursor heartbeat says
+`cursor` rather than pretending to be plain VS Code. Cursor, Windsurf, Trae,
+Antigravity, Kiro, Qoder, VSCodium, Positron and code-server all run it, since
+they are all VS Code forks.
 
 ## Install
 

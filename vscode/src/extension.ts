@@ -1,14 +1,18 @@
 // AI Attribution for VS Code and its forks.
 //
-// One extension covers Cursor, Windsurf, Trae, Antigravity, Kiro, Qoder,
-// VSCodium and code-server, because every one of them runs VS Code extensions.
-// That is the whole reason this exists rather than a per-agent integration:
-// chasing agents is a losing race (there were 29 of them in Hackatime's parser
-// the day this was written), while chasing editors is a fixed, small list.
+// NOT an agent hook, and for most agents a hook is the better tool. A hook runs
+// inside the agent and knows the author outright; core/adapters.py generates one
+// for Cursor, Windsurf, Antigravity, Kiro, Qoder, Codex, Gemini CLI, Qwen Code,
+// Copilot, Cline, Devin and Goose. If the agent is on that list, use the hook.
 //
-// What it measures, precisely: whether text was typed or arrived whole. It
-// cannot see which agent wrote anything — these editors keep that internal —
-// so it never claims to. `human_line_changes` means keystrokes were observed.
+// This exists for the two things a hook structurally cannot do:
+//
+//   1. Pasted code. No agent acted, so no hook fires. A student copying AI
+//      output from a browser is invisible to every hook and visible here.
+//   2. Agents with no hook surface at all — Trae, Roo Code, Cody.
+//
+// What it measures is therefore narrower: whether text was typed or arrived
+// whole. It cannot see which agent wrote anything and never claims to. `human_line_changes` means keystrokes were observed.
 // `ai_line_changes` means lines appeared without them, which covers an agent
 // writing a file AND a paste from a browser, and the two are not
 // distinguishable from here. Say that plainly anywhere the number is shown.
