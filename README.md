@@ -72,25 +72,36 @@ have Claude Code. For Cursor, Codex, Gemini CLI, Cline and the rest, use the
 standalone installer instead — it needs nothing but `curl` and Python 3:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/K-man1/b2b-hook/main/install.sh | sh -s -- --key YOUR_KEY --endpoint https://b2b.hackclub.app
+curl -fsSL https://raw.githubusercontent.com/K-man1/b2b-hook/main/install.sh | sh -s -- --key YOUR_KEY --endpoint https://b2b.hackclub.app --tool cursor
 ```
 
-That one command downloads the plugin, installs it to
-`~/.ai-attribution/plugin`, and connects it to your account. Your dashboard
-shows this line with your key already filled in, so you never copy the key by
-hand.
-
-Then, **inside each project folder you build in**, wire up your app:
-
-```bash
-~/.ai-attribution/bin/aiattr install-hooks cursor
-```
+That one command is the whole setup: it downloads the plugin to
+`~/.ai-attribution/plugin`, connects it to your account, and wires up your
+app's hooks **for every project on the machine** — same as Hackatime, set up
+once and forget it. Your dashboard shows this line with your key already
+filled in, so you never copy the key by hand.
 
 Run `~/.ai-attribution/bin/aiattr install-hooks list` to see the supported
-names. Unlike the Claude Code path, this step is per-project: these tools read
-their hook config from the repo you are working in, not from one global file.
+names, and re-run the `curl` line any time to update.
 
-Re-run the `curl` line any time to update to a newer version.
+### The exceptions
+
+Machine-wide only works where the tool has a user-level hook config. These six
+do not, so they have to be wired up once per repo — run this inside each
+project folder you build in:
+
+```bash
+~/.ai-attribution/bin/aiattr install-hooks cline
+```
+
+| Tool | Why |
+|---|---|
+| Cline | global hooks directory is documented inconsistently; per-repo is the path that reliably works |
+| GitHub Copilot (VS Code) | reads hooks out of the repo's own `.github/`, by design |
+| Goose, Kiro, Qoder, Devin | no user-level hook location found in their docs |
+
+`install-hooks` refuses to run for these from your home directory rather than
+writing a config no tool will ever read.
 
 ---
 

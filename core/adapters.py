@@ -43,6 +43,19 @@ name, because the failure mode of "too broad" is the safe one.
 
 import os
 
+# SCOPE. `user` is a path relative to $HOME that the tool reads for EVERY
+# project; `config` is the per-repo path. Installing to `user` is what makes
+# this behave like Hackatime -- set it up once and every repo is covered --
+# so install-hooks writes there by default and only falls back to the repo
+# path for tools that have no user-level location.
+#
+# Every `user` path below was verified against that tool's own docs (2026-08).
+# A wrong path here is the worst possible bug: the file writes successfully,
+# the tool never reads it, and the student's edits go unrecorded with no error
+# anywhere. So a tool whose user-level path could not be confirmed gets no
+# `user` key at all rather than a plausible guess -- per-repo and working
+# beats machine-wide and silent.
+
 # fields a Claude-Code-shaped hooks.json needs beyond the config path itself:
 # which lifecycle events the tool actually documents, and where the file
 # lives. `events` maps our verb (agent_hook.py's argv) to that tool's event
@@ -51,28 +64,38 @@ CLAUDE_SHAPED = {
     "codex": {
         "label": "Codex CLI",
         "config": (".codex/hooks.json", "hooks.json"),
+        "user": ".codex/hooks.json",
+        # Codex ignores hooks entirely unless this is switched on in
+        # config.toml. See enable_codex_hooks() -- without it the config below
+        # is valid, written, and dead.
+        "feature_flag": ("codex_hooks", "features"),
         "events": {"session-start": "SessionStart", "pre-edit": "PreToolUse",
                    "edit": "PostToolUse", "session-end": "SessionEnd"},
     },
     "gemini-cli": {
         "label": "Gemini CLI",
         "config": (".gemini/settings.json", "settings.json"),
+        "user": ".gemini/settings.json",
         "events": {"session-start": "SessionStart", "pre-edit": "BeforeTool",
                    "edit": "AfterTool", "session-end": "SessionEnd"},
     },
     "qwen-code": {
         "label": "Qwen Code",
         "config": (".qwen/settings.json", "settings.json"),
+        "user": ".qwen/settings.json",
         "events": {"session-start": "SessionStart", "pre-edit": "PreToolUse",
                    "edit": "PostToolUse", "session-end": "SessionEnd"},
     },
     "github-copilot-cli": {
         "label": "GitHub Copilot CLI",
         "config": (".github/hooks/aiattr.json", "hooks.json"),
+        "user": ".copilot/hooks/aiattr.json",
         "events": {"session-start": "sessionStart", "pre-edit": "preToolUse",
                    "edit": "postToolUse", "session-end": "sessionEnd"},
     },
     "github-copilot": {
+        # No user-level path: the VS Code agent reads hooks out of the repo's
+        # own .github/, which is the point of them being committed.
         "label": "GitHub Copilot (VS Code agent mode)",
         "config": (".github/hooks/aiattr.json", "hooks.json"),
         "events": {"session-start": "SessionStart", "pre-edit": "PreToolUse",
@@ -153,10 +176,12 @@ def build_goose(plugin_root, slug):
 
 CUSTOM = {
     "cursor": {"label": "Cursor", "config": (".cursor/hooks.json", None),
-               "build": build_cursor},
+               "user": ".cursor/hooks.json", "build": build_cursor},
     "windsurf": {"label": "Windsurf", "config": (".windsurf/hooks.json", None),
+                 "user": ".codeium/windsurf/hooks.json",
                  "build": build_windsurf},
     "antigravity": {"label": "Antigravity", "config": (".agents/hooks.json", None),
+                    "user": ".gemini/config/hooks.json",
                     "build": build_antigravity},
     "kiro": {"label": "Kiro", "config": (".kiro/hooks/aiattr.json", None),
              "build": build_kiro, "unverified": True},
@@ -199,6 +224,63 @@ UNSUPPORTED = {
                 "own. Whatever AI extension runs inside it (Cline, Copilot, "
                 "...) is covered by that extension's own adapter.",
 }
+
+
+def spec_for(slug):
+    """The adapter spec for a slug, or None if it has no hook support."""
+    return CLAUDE_SHAPED.get(slug) or CUSTOM.get(slug) or SCRIPT.get(slug)
+
+
+def user_scope_path(spec):
+    """Absolute path to this tool's user-level config, or None if it has none."""
+    rel = spec.get("user")
+    return os.path.join(os.path.expanduser("~"), rel) if rel else None
+
+
+def enable_codex_hooks(config_path):
+    """Turn on Codex's `codex_hooks` feature flag in config.toml.
+
+    Codex reads hooks.json only when this is set, so writing the hooks without
+    it produces a setup that looks complete and records nothing. Edited as text
+    rather than parsed: stdlib can read TOML (tomllib) but not write it, and
+    round-tripping through a hand-rolled writer would reformat a file the
+    student owns and may have their own settings in.
+
+    Returns one of "already-on", "added", or "manual" -- the caller tells the
+    student to do it by hand only in that last case.
+    """
+    try:
+        with open(config_path, "r", encoding="utf-8") as fh:
+            text = fh.read()
+    except IOError:
+        text = None
+
+    if text is None:
+        os.makedirs(os.path.dirname(config_path), exist_ok=True)
+        with open(config_path, "w", encoding="utf-8") as fh:
+            fh.write("[features]\ncodex_hooks = true\n")
+        return "added"
+
+    # Already mentioned anywhere: leave it alone. It may be deliberately off,
+    # and flipping a student's own setting is not this command's business.
+    if "codex_hooks" in text:
+        return "already-on" if "codex_hooks = true" in text.replace(
+            "codex_hooks=true", "codex_hooks = true") else "manual"
+
+    lines = text.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == "[features]":
+            lines.insert(i + 1, "codex_hooks = true")
+            with open(config_path, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(lines) + "\n")
+            return "added"
+
+    # No [features] table yet. Appending one is safe; a second [features]
+    # header would not be, which is why the loop above ran first.
+    with open(config_path, "a", encoding="utf-8") as fh:
+        fh.write("\n[features]\ncodex_hooks = true\n" if text.endswith("\n")
+                 else "\n\n[features]\ncodex_hooks = true\n")
+    return "added"
 
 
 def known():

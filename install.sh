@@ -31,6 +31,7 @@ BIN_DIR="${AIATTR_BIN_DIR:-$HOME/.ai-attribution/bin}"
 
 KEY=""
 ENDPOINT=""
+TOOL=""
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -38,8 +39,10 @@ while [ $# -gt 0 ]; do
     --key=*) KEY="${1#*=}"; shift ;;
     --endpoint) ENDPOINT="${2:-}"; shift 2 ;;
     --endpoint=*) ENDPOINT="${1#*=}"; shift ;;
+    --tool) TOOL="${2:-}"; shift 2 ;;
+    --tool=*) TOOL="${1#*=}"; shift ;;
     -h|--help)
-      echo "usage: install.sh [--key KEY] [--endpoint URL]"
+      echo "usage: install.sh [--key KEY] [--endpoint URL] [--tool NAME]"
       exit 0 ;;
     *)
       echo "install.sh: unknown option '$1'" >&2
@@ -156,10 +159,21 @@ if [ -n "$KEY" ] || [ -n "$ENDPOINT" ]; then
   # student a second command they would otherwise have to be told about.
   set -- "$@" --enable-hackatime
   "$shim" "$@"
-  echo
-  echo "Done. Next, inside each project folder you build in, run:"
-  echo "  $shim install-hooks <your-app>"
-  echo "  ($shim install-hooks list  shows the supported names)"
+
+  if [ -n "$TOOL" ]; then
+    echo
+    # Most tools have a user-level hook config, so this wires them up for
+    # every project at once and the whole setup really is this one command.
+    # For the few that do not, install-hooks refuses rather than writing into
+    # the home directory, and prints where it does belong -- so `|| true` here
+    # is deliberate: that refusal is guidance, not an install failure.
+    "$shim" install-hooks "$TOOL" || true
+  else
+    echo
+    echo "Done. Next, wire up your AI coding app:"
+    echo "  $shim install-hooks <your-app>"
+    echo "  ($shim install-hooks list  shows the supported names)"
+  fi
 else
   echo
   echo "Connect it to your account -- your dashboard shows this with your key"

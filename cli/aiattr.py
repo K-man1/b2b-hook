@@ -207,55 +207,66 @@ def cmd_install_hooks(args):
         print("Claude Code is wired in automatically; nothing to install for it.")
         print()
         for slug in adapters.known():
-            if slug in adapters.CLAUDE_SHAPED:
-                how = "config: " + adapters.CLAUDE_SHAPED[slug]["config"][0]
-            elif slug in adapters.CUSTOM:
-                how = "config: " + adapters.CUSTOM[slug]["config"][0]
-                if adapters.CUSTOM[slug].get("unverified"):
-                    how += "  (schema unverified -- check after install)"
-            elif slug in adapters.SCRIPT:
-                how = "script files in: " + adapters.SCRIPT[slug]["dir"]
-            else:
+            spec = adapters.spec_for(slug)
+            if spec is None:
                 how = "not supported: " + adapters.UNSUPPORTED[slug]
-            label = (adapters.CLAUDE_SHAPED.get(slug) or adapters.CUSTOM.get(slug)
-                     or adapters.SCRIPT.get(slug) or {}).get(
+            elif spec.get("user"):
+                how = "every project, via ~/{}".format(spec["user"])
+            elif slug in adapters.SCRIPT:
+                how = "per project: script files in {}".format(spec["dir"])
+            else:
+                how = "per project: {}  (no user-level config exists)".format(
+                    spec["config"][0])
+            if spec and spec.get("unverified"):
+                how += "  (schema unverified -- check after install)"
+            label = (spec or {}).get(
                 "label", adapters.UNSUPPORTED_LABELS.get(slug, slug))
             print("  {:<20} {}".format(slug, label))
             print("      {}".format(how))
         return 0
 
-    root = args.project or os.getcwd()
     slug = agents.resolve(args.tool)["slug"]
 
     if slug in adapters.UNSUPPORTED:
         print("{}: {}".format(slug, adapters.UNSUPPORTED[slug]))
         return 1
 
-    if slug in adapters.CLAUDE_SHAPED:
-        spec = adapters.CLAUDE_SHAPED[slug]
-        rel_path, _ = spec["config"]
-        path = os.path.join(root, rel_path)
-        new_hooks = adapters.build_claude_shaped(spec, PLUGIN_ROOT, slug)
-        _write_json(path, _merge_json_hooks(path, new_hooks))
-        print("Wrote {}".format(path))
-        return 0
+    spec = adapters.spec_for(slug)
+    if spec is None:
+        print("Unknown agent '{}'. Run `install-hooks list` to see what's "
+              "supported.".format(args.tool))
+        return 1
 
-    if slug in adapters.CUSTOM:
-        spec = adapters.CUSTOM[slug]
-        rel_path, _ = spec["config"]
-        path = os.path.join(root, rel_path)
-        new_hooks = spec["build"](PLUGIN_ROOT, slug)
-        _write_json(path, _merge_json_hooks(path, new_hooks))
-        print("Wrote {}".format(path))
-        if spec.get("unverified"):
-            print("Note: {}'s exact hook payload fields are not published. "
-                  "If edits from it never show up in `aiattr.py status`, "
-                  "run it once with AIATTR_DEBUG=1 set and check stderr.".format(slug))
-        return 0
+    # Machine-wide unless the student asked for one repo, or the tool has no
+    # user-level config to write to. Defaulting to machine-wide is the whole
+    # point: a per-repo install has to be remembered for every new project,
+    # and the one that gets forgotten is silently untracked.
+    user_path = adapters.user_scope_path(spec)
+    if args.project is None and user_path:
+        path, scope, root = user_path, "global", None
+    else:
+        root = args.project or os.getcwd()
+        scope = "project"
+
+        # A project-scoped install pointed at the home directory is always a
+        # mistake -- either install.sh passed --tool for a tool that has no
+        # machine-wide setting, or the student ran this before cd-ing anywhere.
+        # Writing there would create a config no tool ever reads while
+        # reporting success, so refuse and say where it does belong.
+        if os.path.realpath(root) == os.path.realpath(os.path.expanduser("~")):
+            print("{} has no machine-wide hook config, so this has to be "
+                  "installed per project.".format(spec.get("label", slug)))
+            print("Your home directory is not a project. cd into the folder "
+                  "you build in, then run:")
+            print("  aiattr install-hooks {}".format(slug))
+            return 1
+
+        # SCRIPT tools have a directory of files, not one config path.
+        path = None if slug in adapters.SCRIPT else os.path.join(
+            root, spec["config"][0])
 
     if slug in adapters.SCRIPT:
-        spec = adapters.SCRIPT[slug]
-        hook_dir = os.path.join(root, spec["dir"])
+        hook_dir = os.path.join(root or os.getcwd(), spec["dir"])
         os.makedirs(hook_dir, exist_ok=True)
         for event_name, verb in spec["events"].items():
             script_path = os.path.join(hook_dir, event_name)
@@ -267,11 +278,54 @@ def cmd_install_hooks(args):
                     verb, slug))
             os.chmod(script_path, 0o755)
             print("Wrote {}".format(script_path))
+        _scope_note(spec, scope)
         return 0
 
-    print("Unknown agent '{}'. Run `install-hooks list` to see what's "
-          "supported.".format(args.tool))
-    return 1
+    if slug in adapters.CLAUDE_SHAPED:
+        new_hooks = adapters.build_claude_shaped(spec, PLUGIN_ROOT, slug)
+    else:
+        new_hooks = spec["build"](PLUGIN_ROOT, slug)
+
+    _write_json(path, _merge_json_hooks(path, new_hooks))
+    print("Wrote {}".format(path))
+
+    # Some tools gate hooks behind a setting. Writing the config without
+    # flipping it produces a setup that looks finished and records nothing.
+    flag = spec.get("feature_flag")
+    if flag and scope == "global":
+        key, _section = flag
+        cfg = os.path.join(os.path.expanduser("~"), ".codex", "config.toml")
+        result = adapters.enable_codex_hooks(cfg)
+        if result == "added":
+            print("Enabled {} in {}".format(key, cfg))
+        elif result == "manual":
+            print("NOTE: {} is present but not set to true in {}.".format(key, cfg))
+            print("      Hooks will not run until it is. Set it by hand.")
+
+    if spec.get("unverified"):
+        print("Note: {}'s exact hook payload fields are not published. "
+              "If edits from it never show up in `aiattr.py status`, "
+              "run it once with AIATTR_DEBUG=1 set and check stderr.".format(slug))
+    _scope_note(spec, scope)
+    return 0
+
+
+def _scope_note(spec, scope):
+    """Say which projects this install actually covers, every time.
+
+    Silence here is how a student ends up believing a per-repo install is
+    machine-wide and only finds out weeks later that most of their work was
+    never recorded.
+    """
+    if scope == "global":
+        print("This covers every project on this machine. Nothing to repeat.")
+    elif spec.get("user"):
+        print("Installed for this project only. Drop --project to cover every "
+              "project instead.")
+    else:
+        print("{} has no user-level hook config, so this covers this project "
+              "only -- run it again in each repo you build in.".format(
+                  spec.get("label", "This tool")))
 
 
 def cmd_flush(args):
@@ -355,7 +409,9 @@ def main():
     h = sub.add_parser("install-hooks",
                        help="wire up an agent other than Claude Code")
     h.add_argument("tool", help="agent slug (e.g. cursor, codex), or 'list'")
-    h.add_argument("--project", help="repo to install into (default: current directory)")
+    h.add_argument("--project", nargs="?", const=".", default=None,
+                   help="install into one repo instead of machine-wide "
+                        "(default: this directory)")
 
     args = ap.parse_args()
     handlers = {

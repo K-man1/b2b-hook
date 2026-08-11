@@ -554,6 +554,78 @@ def test_agent_hook_drives_a_non_claude_agent_end_to_end():
         del os.environ["AIATTR_DATA_DIR"]
 
 
+def test_hooks_install_machine_wide_by_default():
+    """install-hooks must cover every project, not just the current directory.
+
+    A per-repo install is one a student has to remember for every new project,
+    and the one they forget is silently untracked -- the failure mode is
+    missing data with no error anywhere, which is the worst kind here. So any
+    tool with a user-level config must install there by default.
+
+    Run as a subprocess against a fake HOME rather than by calling the function,
+    because the thing being tested is precisely which absolute path gets
+    written, and only a real run proves that.
+    """
+    import subprocess
+    import sys as _sys
+    import tempfile
+    from core import adapters
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    cli = os.path.join(here, "..", "cli", "aiattr.py")
+
+    with tempfile.TemporaryDirectory() as home:
+        env = dict(os.environ)
+        env["HOME"] = home
+        env["AIATTR_DATA_DIR"] = os.path.join(home, "data")
+
+        # Run from inside the fake home, which is what install.sh does.
+        r = subprocess.run([_sys.executable, cli, "install-hooks", "windsurf"],
+                           capture_output=True, text=True, env=env, cwd=home)
+        expected = os.path.join(home, ".codeium", "windsurf", "hooks.json")
+        check("a user-level tool installs to $HOME, not the current directory",
+              r.returncode == 0 and os.path.isfile(expected),
+              r.stdout + r.stderr)
+        check("and says so, so nobody re-runs it per project",
+              "every project" in r.stdout, r.stdout)
+
+        # Codex is dead without its feature flag, so writing hooks alone is
+        # not enough to call the install done.
+        subprocess.run([_sys.executable, cli, "install-hooks", "codex"],
+                       capture_output=True, text=True, env=env, cwd=home)
+        toml = os.path.join(home, ".codex", "config.toml")
+        check("codex's hooks feature flag is turned on, or hooks never fire",
+              os.path.isfile(toml) and "codex_hooks = true" in open(toml).read(),
+              toml)
+
+        # A tool with no user-level config must refuse rather than write a
+        # config into the home directory that nothing will ever read.
+        r = subprocess.run([_sys.executable, cli, "install-hooks", "cline"],
+                           capture_output=True, text=True, env=env, cwd=home)
+        check("a per-project tool refuses to install into the home directory",
+              r.returncode == 1 and not os.path.exists(
+                  os.path.join(home, ".clinerules")),
+              r.stdout + r.stderr)
+
+        # ...but still works in a real project.
+        proj = os.path.join(home, "proj")
+        os.makedirs(proj)
+        r = subprocess.run([_sys.executable, cli, "install-hooks", "cline"],
+                           capture_output=True, text=True, env=env, cwd=proj)
+        check("and still installs normally inside an actual project",
+              r.returncode == 0 and os.path.isfile(
+                  os.path.join(proj, ".clinerules", "hooks", "PostToolUse")),
+              r.stdout + r.stderr)
+
+    # Guard the table itself: a `user` path that is absolute or escapes home
+    # would be written to the wrong place entirely.
+    bad = [s for s, spec in list(adapters.CLAUDE_SHAPED.items())
+           + list(adapters.CUSTOM.items())
+           if spec.get("user") and (os.path.isabs(spec["user"])
+                                    or ".." in spec["user"])]
+    check("every user-level path is home-relative", bad == [], str(bad))
+
+
 def main():
     import json as _json
     globals()["json"] = _json
@@ -569,6 +641,7 @@ def main():
     print("privacy / opt-out");     test_opt_out_is_not_reported(); test_remote_credentials_stripped()
     print("agent identity");        test_two_agents_are_not_merged_into_one_claim()
     print("agent_hook adapter");    test_agent_hook_drives_a_non_claude_agent_end_to_end()
+    print("hook install scope");    test_hooks_install_machine_wide_by_default()
     print()
     print("{} passed, {} failed".format(len(PASS), len(FAIL)))
     return 1 if FAIL else 0
