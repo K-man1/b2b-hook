@@ -27,9 +27,9 @@ oversight otherwise:
   - opencode, Amp: hooks exist but require real JS/TS plugin code, not a
     declarative "run this shell command" entry. install-hooks does not write
     code in a language this plugin has no other footprint in.
-  - VSCodium, code-server: editors, not agents. An AI extension running
-    inside one (Cline, Copilot, ...) is covered by that extension's own
-    entry; the host adds no separate hook surface.
+  - VSCodium: an editor, not an agent. An AI extension running inside it
+    (Cline, Copilot, ...) is covered by that extension's own entry; the host
+    adds no separate hook surface.
 
 MATCHER ASSUMPTION, stated once here rather than in every builder: every
 CLAUDE_SHAPED tool's docs describe an absent or empty `matcher` as "run for
@@ -178,7 +178,6 @@ SCRIPT = {
 UNSUPPORTED_LABELS = {
     "trae": "Trae", "roo-code": "Roo Code", "cody": "Cody",
     "opencode": "opencode", "amp": "Amp", "vscodium": "VSCodium",
-    "code-server": "code-server",
 }
 
 UNSUPPORTED = {
@@ -199,8 +198,6 @@ UNSUPPORTED = {
     "vscodium": "An editor, not an agent -- nothing writes code here on its "
                 "own. Whatever AI extension runs inside it (Cline, Copilot, "
                 "...) is covered by that extension's own adapter.",
-    "code-server": "Same as VSCodium: a host, not an agent. Covered via "
-                   "whichever extension runs inside it.",
 }
 
 

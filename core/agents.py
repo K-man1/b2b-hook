@@ -56,10 +56,10 @@ AGENTS = {
     "devin": {"editor": "devin", "label": "Devin", "verified": False},
 }
 
-# Deliberately absent: vscodium and code-server. Neither writes code, so neither
-# can author a line. They are editors that other agents run inside, and the
-# agent is what this records. Listing them would invite a heartbeat claiming an
-# editor authored something, which is exactly the claim we cannot support.
+# Deliberately absent: vscodium. It does not write code, so it cannot author a
+# line. It is an editor that other agents run inside, and the agent is what this
+# records. Listing it would invite a heartbeat claiming an editor authored
+# something, which is exactly the claim we cannot support.
 
 UA = "{} ai-attribution-wakatime/{}"
 

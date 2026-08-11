@@ -32,8 +32,12 @@ claude plugin install ai-attribution@ai-attribution-marketplace --scope user
 so give yourself a shortcut. Add this to `~/.zshrc` (or `~/.bashrc`):
 
 ```bash
-alias aiattr='python3 "$(ls -d ~/.claude/plugins/cache/ai-attribution-marketplace/ai-attribution/*/ | sort -V | tail -1)cli/aiattr.py"'
+alias aiattr='$(command -v python3 || command -v python) "$(ls -d ~/.claude/plugins/cache/ai-attribution-marketplace/ai-attribution/*/ | sort -V | tail -1)cli/aiattr.py"'
 ```
+
+(`command -v python3 || command -v python` rather than a plain `python3`
+because on plenty of machines — Windows especially, where `python3` is often
+the Microsoft Store stub — the working Python 3 is called `python`.)
 
 **4. Connect it to your account.** Your Back to Basics dashboard shows a
 `configure` command with your key already filled in. It looks like this:
@@ -58,6 +62,35 @@ aiattr status
 You are looking for `reporting: on`, and `hackatime: on` if you did step 5.
 
 That is the whole setup. Work normally from here.
+
+---
+
+## Not using Claude Code?
+
+Everything above goes through `claude plugin install`, which only exists if you
+have Claude Code. For Cursor, Codex, Gemini CLI, Cline and the rest, use the
+standalone installer instead — it needs nothing but `curl` and Python 3:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/K-man1/b2b-hook/main/install.sh | sh -s -- --key YOUR_KEY --endpoint https://b2b.hackclub.app
+```
+
+That one command downloads the plugin, installs it to
+`~/.ai-attribution/plugin`, and connects it to your account. Your dashboard
+shows this line with your key already filled in, so you never copy the key by
+hand.
+
+Then, **inside each project folder you build in**, wire up your app:
+
+```bash
+~/.ai-attribution/bin/aiattr install-hooks cursor
+```
+
+Run `~/.ai-attribution/bin/aiattr install-hooks list` to see the supported
+names. Unlike the Claude Code path, this step is per-project: these tools read
+their hook config from the repo you are working in, not from one global file.
+
+Re-run the `curl` line any time to update to a newer version.
 
 ---
 

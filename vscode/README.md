@@ -42,7 +42,7 @@ holding only typed lines are never sent, and both producers tag heartbeats
 
 It reports itself under the real editor's name, so a Cursor heartbeat says
 `cursor` rather than pretending to be plain VS Code. Cursor, Windsurf, Trae,
-Antigravity, Kiro, Qoder, VSCodium, Positron and code-server all run it, since
+Antigravity, Kiro, Qoder, VSCodium and Positron all run it, since
 they are all VS Code forks.
 
 ## Install
