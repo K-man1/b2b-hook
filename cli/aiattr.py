@@ -195,6 +195,25 @@ def _merge_json_hooks(path, new_hooks):
     return existing
 
 
+def _merge_bare_hooks(path, events):
+    """Same merge as _merge_json_hooks, for files where the hooks object is the
+    whole file rather than a "hooks" key inside it (Devin's hooks.v1.json)."""
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            existing = json.load(fh)
+    except (OSError, ValueError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+    for event, entries in events.items():
+        current = list(existing.get(event) or [])
+        for entry in entries:
+            if entry not in current:
+                current.append(entry)
+        existing[event] = current
+    return existing
+
+
 def _write_json(path, data):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
@@ -212,6 +231,9 @@ def cmd_install_hooks(args):
                 how = "not supported: " + adapters.UNSUPPORTED[slug]
             elif spec.get("user"):
                 how = "every project, via ~/{}".format(spec["user"])
+            elif spec.get("user_dirs"):
+                how = "every project, via " + " and ".join(
+                    "~/" + d for d in spec["user_dirs"])
             elif slug in adapters.SCRIPT:
                 how = "per project: script files in {}".format(spec["dir"])
             else:
@@ -242,7 +264,7 @@ def cmd_install_hooks(args):
     # point: a per-repo install has to be remembered for every new project,
     # and the one that gets forgotten is silently untracked.
     user_path = adapters.user_scope_path(spec)
-    if args.project is None and user_path:
+    if args.project is None and adapters.has_user_scope(spec):
         path, scope, root = user_path, "global", None
     else:
         root = args.project or os.getcwd()
@@ -266,18 +288,26 @@ def cmd_install_hooks(args):
             root, spec["config"][0])
 
     if slug in adapters.SCRIPT:
-        hook_dir = os.path.join(root or os.getcwd(), spec["dir"])
-        os.makedirs(hook_dir, exist_ok=True)
-        for event_name, verb in spec["events"].items():
-            script_path = os.path.join(hook_dir, event_name)
-            with open(script_path, "w", encoding="utf-8") as fh:
-                fh.write("#!/usr/bin/env bash\n")
-                fh.write('exec bash "{}" "{}" {} --agent {}\n'.format(
-                    os.path.join(PLUGIN_ROOT, "hooks", "py.sh"),
-                    os.path.join(PLUGIN_ROOT, "hooks", "agent_hook.py"),
-                    verb, slug))
-            os.chmod(script_path, 0o755)
-            print("Wrote {}".format(script_path))
+        if scope == "global":
+            hook_dirs = adapters.user_scope_dirs(spec)
+        else:
+            hook_dirs = [os.path.join(root or os.getcwd(), spec["dir"])]
+        for hook_dir in hook_dirs:
+            os.makedirs(hook_dir, exist_ok=True)
+            for event_name, verb in spec["events"].items():
+                script_path = os.path.join(hook_dir, event_name)
+                with open(script_path, "w", encoding="utf-8") as fh:
+                    fh.write("#!/usr/bin/env bash\n")
+                    fh.write('exec bash "{}" "{}" {} --agent {}\n'.format(
+                        os.path.join(PLUGIN_ROOT, "hooks", "py.sh"),
+                        os.path.join(PLUGIN_ROOT, "hooks", "agent_hook.py"),
+                        verb, slug))
+                os.chmod(script_path, 0o755)
+                print("Wrote {}".format(script_path))
+        if scope == "global" and len(hook_dirs) > 1:
+            print("Written to every location {} is documented to read, "
+                  "because its own docs and its runtime disagree.".format(
+                      spec.get("label", slug)))
         _scope_note(spec, scope)
         return 0
 
@@ -286,7 +316,12 @@ def cmd_install_hooks(args):
     else:
         new_hooks = spec["build"](PLUGIN_ROOT, slug)
 
-    _write_json(path, _merge_json_hooks(path, new_hooks))
+    # One tool (Devin) wants the hooks object bare in its project file and
+    # wrapped everywhere else. Unwrap only for the file that asks for it.
+    if scope == "project" and spec.get("project_unwrapped"):
+        _write_json(path, _merge_bare_hooks(path, new_hooks.get("hooks", {})))
+    else:
+        _write_json(path, _merge_json_hooks(path, new_hooks))
     print("Wrote {}".format(path))
 
     # Some tools gate hooks behind a setting. Writing the config without

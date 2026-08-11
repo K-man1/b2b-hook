@@ -94,9 +94,12 @@ CLAUDE_SHAPED = {
                    "edit": "postToolUse", "session-end": "sessionEnd"},
     },
     "github-copilot": {
-        # No user-level path: the VS Code agent reads hooks out of the repo's
-        # own .github/, which is the point of them being committed.
-        "label": "GitHub Copilot (VS Code agent mode)",
+        # Genuinely repo-only, and not for the reason the label suggests:
+        # GitHub documents hooks for Copilot CLI and the Copilot *cloud agent*
+        # and does not list VS Code at all. The cloud agent runs in an
+        # ephemeral clone where user-level hooks are unreachable by design, so
+        # .github/hooks/ committed to the repo is the only thing it can read.
+        "label": "GitHub Copilot (repo agent)",
         "config": (".github/hooks/aiattr.json", "hooks.json"),
         "events": {"session-start": "SessionStart", "pre-edit": "PreToolUse",
                    "edit": "PostToolUse"},
@@ -104,12 +107,19 @@ CLAUDE_SHAPED = {
     "devin": {
         "label": "Devin CLI",
         "config": (".devin/hooks.v1.json", "hooks.v1.json"),
+        "user": ".config/devin/config.json",
+        # Devin is the one tool whose two scopes want different shapes: in
+        # .devin/hooks.v1.json the hooks object IS the whole file, while every
+        # other location it reads (including the user-level config.json this
+        # now writes) nests it under a "hooks" key.
+        "project_unwrapped": True,
         "events": {"session-start": "SessionStart", "pre-edit": "PreToolUse",
                    "edit": "PostToolUse", "session-end": "SessionEnd"},
     },
     "qoder": {
         "label": "Qoder",
         "config": (".qoder/settings.json", "settings.json"),
+        "user": ".qoder/settings.json",
         "events": {"session-start": "SessionStart", "pre-edit": "PreToolUse",
                    "edit": "PostToolUse", "session-end": "SessionEnd"},
     },
@@ -183,18 +193,42 @@ CUSTOM = {
     "antigravity": {"label": "Antigravity", "config": (".agents/hooks.json", None),
                     "user": ".gemini/config/hooks.json",
                     "build": build_antigravity},
+    # Kiro does have ~/.kiro/hooks/, but only in CLI v3 (early access) -- the
+    # IDE, which is how most people use Kiro, has an open bug for exactly this
+    # (kirodotdev/Kiro#9075: user-level hooks not discovered). Installing there
+    # by default would look machine-wide and record nothing for IDE users, so
+    # it stays per-project until the IDE reads it too.
     "kiro": {"label": "Kiro", "config": (".kiro/hooks/aiattr.json", None),
              "build": build_kiro, "unverified": True},
+    # Open Plugins layout: any plugin directory containing hooks/hooks.json is
+    # auto-discovered, at ~/.agents/plugins/<name>/ for user scope and
+    # <project>/.agents/plugins/<name>/ for project scope.
     "goose": {"label": "Goose",
               "config": (".agents/plugins/aiattr/hooks/hooks.json", None),
+              "user": ".agents/plugins/aiattr/hooks/hooks.json",
               "build": build_goose},
 }
 
 # Cline wants one executable file per event, named exactly the event, no JSON.
+#
+# `user_dirs` is a list, and that is not hedging -- Cline's own sources
+# disagree about where global hooks live, so there is no single path to pick:
+#
+#   ~/Documents/Cline/Rules/Hooks/  what the docs and the v3.36 release post say
+#   ~/Cline/Hooks/                  what the runtime actually reads, per
+#                                   cline/cline#9994 (open: the management UI
+#                                   writes ~/Documents/Cline/Hooks/ while the
+#                                   runtime looks in ~/Cline/Hooks/, so global
+#                                   hooks silently never fire)
+#
+# Each hook is a three-line shell script, so writing both costs nothing and
+# means the install works whichever path a given build resolves. Picking one
+# and being wrong costs a student their entire attribution history, silently.
 SCRIPT = {
     "cline": {
         "label": "Cline",
         "dir": ".clinerules/hooks",
+        "user_dirs": ["Documents/Cline/Rules/Hooks", "Cline/Hooks"],
         "events": {"PostToolUse": "edit", "SessionStart": "session-start",
                    "SessionEnd": "session-end"},
     },
@@ -235,6 +269,20 @@ def user_scope_path(spec):
     """Absolute path to this tool's user-level config, or None if it has none."""
     rel = spec.get("user")
     return os.path.join(os.path.expanduser("~"), rel) if rel else None
+
+
+def user_scope_dirs(spec):
+    """Absolute user-level hook directories for a SCRIPT tool (may be several).
+
+    Returns [] when the tool has no user-level location. See SCRIPT's comment
+    for why Cline needs more than one.
+    """
+    home = os.path.expanduser("~")
+    return [os.path.join(home, rel) for rel in spec.get("user_dirs") or []]
+
+
+def has_user_scope(spec):
+    return bool(spec.get("user") or spec.get("user_dirs"))
 
 
 def enable_codex_hooks(config_path):

@@ -598,23 +598,49 @@ def test_hooks_install_machine_wide_by_default():
               os.path.isfile(toml) and "codex_hooks = true" in open(toml).read(),
               toml)
 
-        # A tool with no user-level config must refuse rather than write a
-        # config into the home directory that nothing will ever read.
-        r = subprocess.run([_sys.executable, cli, "install-hooks", "cline"],
+        # Cline's own docs and its runtime disagree about the global path, so
+        # every documented location gets written. Picking one and being wrong
+        # would silently record nothing.
+        subprocess.run([_sys.executable, cli, "install-hooks", "cline"],
+                       capture_output=True, text=True, env=env, cwd=home)
+        check("cline is installed to every path its sources disagree about",
+              all(os.path.isfile(os.path.join(home, d, "PostToolUse"))
+                  for d in ("Documents/Cline/Rules/Hooks", "Cline/Hooks")),
+              str(os.listdir(home)))
+
+        # Devin wants the hooks object bare in its project file and wrapped
+        # everywhere else -- the one tool where scope changes the shape.
+        proj = os.path.join(home, "proj")
+        os.makedirs(proj)
+        subprocess.run([_sys.executable, cli, "install-hooks", "devin"],
+                       capture_output=True, text=True, env=env, cwd=home)
+        subprocess.run([_sys.executable, cli, "install-hooks", "devin",
+                        "--project"],
+                       capture_output=True, text=True, env=env, cwd=proj)
+        with open(os.path.join(proj, ".devin", "hooks.v1.json")) as fh:
+            bare = json.load(fh)
+        with open(os.path.join(home, ".config", "devin", "config.json")) as fh:
+            wrapped = json.load(fh)
+        check("devin's project file has no hooks wrapper, its user file does",
+              "hooks" not in bare and "PostToolUse" in bare
+              and "PostToolUse" in wrapped.get("hooks", {}),
+              "{} / {}".format(sorted(bare), sorted(wrapped)))
+
+        # A tool with no user-level config at all must refuse rather than
+        # write a config into the home directory that nothing will ever read.
+        r = subprocess.run([_sys.executable, cli, "install-hooks", "kiro"],
                            capture_output=True, text=True, env=env, cwd=home)
-        check("a per-project tool refuses to install into the home directory",
+        check("a per-project-only tool refuses to install into the home dir",
               r.returncode == 1 and not os.path.exists(
-                  os.path.join(home, ".clinerules")),
+                  os.path.join(home, ".kiro")),
               r.stdout + r.stderr)
 
         # ...but still works in a real project.
-        proj = os.path.join(home, "proj")
-        os.makedirs(proj)
-        r = subprocess.run([_sys.executable, cli, "install-hooks", "cline"],
+        r = subprocess.run([_sys.executable, cli, "install-hooks", "kiro"],
                            capture_output=True, text=True, env=env, cwd=proj)
         check("and still installs normally inside an actual project",
               r.returncode == 0 and os.path.isfile(
-                  os.path.join(proj, ".clinerules", "hooks", "PostToolUse")),
+                  os.path.join(proj, ".kiro", "hooks", "aiattr.json")),
               r.stdout + r.stderr)
 
     # Guard the table itself: a `user` path that is absolute or escapes home

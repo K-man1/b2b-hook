@@ -84,24 +84,28 @@ filled in, so you never copy the key by hand.
 Run `~/.ai-attribution/bin/aiattr install-hooks list` to see the supported
 names, and re-run the `curl` line any time to update.
 
-### The exceptions
+### The two exceptions
 
-Machine-wide only works where the tool has a user-level hook config. These six
-do not, so they have to be wired up once per repo — run this inside each
-project folder you build in:
+Machine-wide needs a user-level hook location, and two tools do not have a
+usable one. For these, run this inside each project folder you build in:
 
 ```bash
-~/.ai-attribution/bin/aiattr install-hooks cline
+~/.ai-attribution/bin/aiattr install-hooks kiro
 ```
 
 | Tool | Why |
 |---|---|
-| Cline | global hooks directory is documented inconsistently; per-repo is the path that reliably works |
-| GitHub Copilot (VS Code) | reads hooks out of the repo's own `.github/`, by design |
-| Goose, Kiro, Qoder, Devin | no user-level hook location found in their docs |
+| Kiro | `~/.kiro/hooks/` exists, but only in the v3 CLI (early access); the IDE does not read it yet ([Kiro#9075](https://github.com/kirodotdev/Kiro/issues/9075)) |
+| GitHub Copilot (repo agent) | GitHub documents hooks for the CLI and the cloud agent, not for VS Code. The cloud agent runs in a throwaway clone that cannot reach machine-wide settings, so its hooks belong in the repo. Using Copilot in the terminal? Pick `github-copilot-cli`, which installs once. |
 
-`install-hooks` refuses to run for these from your home directory rather than
+`install-hooks` refuses to run these from your home directory rather than
 writing a config no tool will ever read.
+
+Cline is a special case that still installs machine-wide: its docs say global
+hooks live in `~/Documents/Cline/Rules/Hooks/` while its runtime reads
+`~/Cline/Hooks/` ([cline#9994](https://github.com/cline/cline/issues/9994), open),
+so both get written. They are three-line scripts; picking one and being wrong
+would cost you every record silently.
 
 ---
 
