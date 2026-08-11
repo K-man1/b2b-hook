@@ -5,7 +5,9 @@
 // the only place this extension can be wrong in a way that accuses somebody, so
 // the cases that matter most are the ones that must NOT read as "appeared".
 
-import { classify, isWholeDocumentReplace, type RawChange } from "./classify";
+import {
+  classify, isWholeDocumentReplace, touchedLines, type RawChange,
+} from "./classify";
 import { detect, isExcluded } from "./project";
 import * as fs from "fs";
 import * as os from "os";
@@ -125,6 +127,64 @@ check("nested node_modules too", isExcluded("web/node_modules/x.js"));
 check("lockfiles are excluded", isExcluded("package-lock.json"));
 check("minified output is excluded", isExcluded("dist/app.min.js"));
 check("real source is not", !isExcluded("src/index.ts"));
+
+// --- per-line scoring -------------------------------------------------------
+//
+// Regression: scoring counted change EVENTS. Typing arrives one character per
+// event, so a 40-character line reported 41 human lines and an hour of typing
+// reported thousands. What follows simulates the real event stream.
+
+console.log("scoring counts lines, not keystrokes");
+
+function typeOut(text: string, startLine = 0): Map<number, string> {
+  const touched = new Map<number, string>();
+  let line = startLine;
+  for (const chunk of text) {
+    const c = classify(ch(chunk));
+    for (const l of touchedLines(line, chunk)) touched.set(l, c.origin);
+    if (chunk === "\n") line++;
+  }
+  return touched;
+}
+
+function tally(m: Map<number, string>) {
+  let ai = 0, human = 0;
+  for (const o of m.values()) o === "appeared" ? ai++ : human++;
+  return { ai, human };
+}
+
+const sdlkfh = tally(typeOut("sdlkfh"));
+check(
+  'typing "sdlkfh" is 1 human line, not 6',
+  sdlkfh.human === 1 && sdlkfh.ai === 0,
+  JSON.stringify(sdlkfh),
+);
+
+const oneLine = tally(typeOut("const total = items.reduce((a, b) => a + b, 0);"));
+check(
+  "typing a 40-char line is 1 human line, not 41",
+  oneLine.human === 1,
+  JSON.stringify(oneLine),
+);
+
+const threeLines = tally(typeOut("function f() {\n  return 1;\n}"));
+check(
+  "typing three lines is 3 human lines",
+  threeLines.human === 3 && threeLines.ai === 0,
+  JSON.stringify(threeLines),
+);
+
+// An agent writing a block, then the student fixing one line inside it.
+const mixed = new Map<number, string>();
+const block = classify(ch("a();\nb();\nc();\nd();"));
+for (const l of touchedLines(10, "a();\nb();\nc();\nd();")) mixed.set(l, block.origin);
+for (const [l, o] of typeOut("x", 11)) mixed.set(l, o);
+const mixedTally = tally(mixed);
+check(
+  "editing one line of an agent block moves only that line",
+  mixedTally.ai === 3 && mixedTally.human === 1,
+  JSON.stringify(mixedTally),
+);
 
 fs.rmSync(tmp, { recursive: true, force: true });
 

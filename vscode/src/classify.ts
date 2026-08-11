@@ -41,12 +41,26 @@ const APPEARED_CHARS = 120;
 // snippet, which is exactly the shape of most generated code.
 const APPEARED_NEWLINES = 2;
 
-function countNewlines(text: string): number {
+export function countNewlines(text: string): number {
   let n = 0;
   for (let i = 0; i < text.length; i++) {
     if (text.charCodeAt(i) === 10) n++;
   }
   return n;
+}
+
+// Which line numbers a change lands on, in the document as it now stands.
+//
+// Scoring has to be per line, not per event. Typing arrives one character at a
+// time, so counting events meant a 40-character line scored 41 human lines and
+// a student who typed for an hour reported thousands. Recording WHICH lines
+// were touched and counting them once is the only version of this that matches
+// what `ai_line_changes` and `human_line_changes` are supposed to mean.
+export function touchedLines(startLine: number, text: string): number[] {
+  const added = countNewlines(text);
+  const out: number[] = [];
+  for (let i = 0; i <= added; i++) out.push(startLine + i);
+  return out;
 }
 
 // One VS Code content change, already narrowed to what matters. Kept as a

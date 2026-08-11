@@ -25,7 +25,9 @@
 
 import * as path from "path";
 import * as vscode from "vscode";
-import { classify, isWholeDocumentReplace, type RawChange } from "./classify";
+import {
+  classify, isWholeDocumentReplace, touchedLines, type Origin, type RawChange,
+} from "./classify";
 import {
   CATEGORY, MAX_BATCH, apiKey, apiUrl, languageFor, send, type Heartbeat,
 } from "./hackatime";
@@ -54,10 +56,28 @@ interface Bucket {
   branch?: string;
   entity: string;
   language?: string;
-  ai: number;
-  human: number;
+  // Line number -> who last touched it. A map rather than two counters because
+  // the unit being reported is lines: counting change events instead made a
+  // 40-character typed line score 41 human lines, since each keystroke is its
+  // own event. Last writer wins on a line an agent wrote and a human then
+  // edited, matching provenance.retag in the Python plugin.
+  //
+  // Line numbers shift when text is inserted above them, so a bucket held open
+  // across large edits is approximate. It is bounded by the flush interval and
+  // is a far smaller error than counting keystrokes.
+  origins: Map<number, Origin>;
   lines: number;
   time: number;
+}
+
+function countOrigins(b: Bucket): { ai: number; human: number } {
+  let ai = 0;
+  let human = 0;
+  for (const origin of b.origins.values()) {
+    if (origin === "appeared") ai++;
+    else human++;
+  }
+  return { ai, human };
 }
 
 let out: vscode.OutputChannel;
@@ -97,8 +117,8 @@ function projectFor(doc: vscode.TextDocument): Project | null {
   return detect(folder ? folder.uri.fsPath : path.dirname(doc.uri.fsPath));
 }
 
-function record(doc: vscode.TextDocument, ai: number, human: number) {
-  if (!ai && !human) return;
+function record(doc: vscode.TextDocument, touched: Map<number, Origin>) {
+  if (!touched.size) return;
   if (!enabled()) return;
 
   const project = projectFor(doc);
@@ -112,8 +132,7 @@ function record(doc: vscode.TextDocument, ai: number, human: number) {
     (b) => b.project === project.name && b.entity === rel,
   );
   if (existing) {
-    existing.ai += ai;
-    existing.human += human;
+    for (const [line, origin] of touched) existing.origins.set(line, origin);
     existing.lines = doc.lineCount;
     existing.time = now;
   } else {
@@ -122,17 +141,18 @@ function record(doc: vscode.TextDocument, ai: number, human: number) {
       branch: project.branch,
       entity: rel,
       language: languageFor(rel),
-      ai,
-      human,
+      origins: new Map(touched),
       lines: doc.lineCount,
       time: now,
     });
     if (pending.length > MAX_PENDING) pending = pending.slice(-MAX_PENDING);
   }
-  log(`record ${rel} ai=${ai} human=${human}`);
+  const n = countOrigins(pending.find((b) => b.entity === rel)!);
+  log(`record ${rel} appeared=${n.ai} typed=${n.human}`);
 }
 
 function build(b: Bucket): Heartbeat {
+  const { ai, human } = countOrigins(b);
   const hb: Heartbeat = {
     entity: b.entity,
     type: "file",
@@ -143,8 +163,8 @@ function build(b: Bucket): Heartbeat {
     editor: editorName(),
     plugin: PLUGIN_UA(),
     lines: b.lines,
-    ai_line_changes: b.ai,
-    human_line_changes: b.human,
+    ai_line_changes: ai,
+    human_line_changes: human,
   };
   if (b.language) hb.language = b.language;
   if (b.branch) hb.branch = b.branch;
@@ -156,8 +176,10 @@ async function flush(force = false) {
   const now = Date.now();
   if (!force && now - lastSend < SEND_INTERVAL_MS) return;
 
-  const ready = pending.filter((b) => b.ai > 0);
-  const held = pending.filter((b) => !b.ai && now - b.time < HUMAN_ONLY_TTL_MS);
+  const ready = pending.filter((b) => countOrigins(b).ai > 0);
+  const held = pending.filter(
+    (b) => countOrigins(b).ai === 0 && now - b.time < HUMAN_ONLY_TTL_MS,
+  );
   if (!ready.length) {
     pending = held;
     return;
@@ -193,8 +215,7 @@ function onChange(e: vscode.TextDocumentChangeEvent) {
   if (e.reason === vscode.TextDocumentChangeReason.Redo) return;
 
   const docLength = e.document.getText().length;
-  let ai = 0;
-  let human = 0;
+  const touched = new Map<number, Origin>();
 
   for (const change of e.contentChanges) {
     const raw: RawChange = {
@@ -207,15 +228,13 @@ function onChange(e: vscode.TextDocumentChangeEvent) {
     if (isWholeDocumentReplace(raw, docLength)) continue;
 
     const c = classify(raw);
-    if (!c.linesAdded && !c.chars) continue;
-    // Lines, not characters: a heartbeat's unit is lines, and one long line is
-    // still one line however it arrived.
-    const scored = Math.max(c.linesAdded, c.chars > 0 ? 1 : 0);
-    if (c.origin === "appeared") ai += scored;
-    else human += scored;
+    if (!c.chars && !c.linesRemoved) continue;
+    for (const line of touchedLines(change.range.start.line, change.text)) {
+      touched.set(line, c.origin);
+    }
   }
 
-  record(e.document, ai, human);
+  record(e.document, touched);
 }
 
 export function activate(context: vscode.ExtensionContext) {
@@ -259,7 +278,8 @@ export function activate(context: vscode.ExtensionContext) {
       );
       out.appendLine(`pending     : ${pending.length} bucket(s)`);
       for (const b of pending.slice(0, 10)) {
-        out.appendLine(`   ${b.entity}  appeared=${b.ai} typed=${b.human}`);
+        const n = countOrigins(b);
+        out.appendLine(`   ${b.entity}  appeared=${n.ai} typed=${n.human}`);
       }
     }),
   );
