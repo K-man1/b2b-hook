@@ -45,8 +45,9 @@ def totals_summary(data):
     }
 
 
-def main():
-    payload = C.read_input()
+def main(payload=None):
+    if payload is None:
+        payload = C.read_input()
     ctx = C.context(payload)
     if ctx is None:
         return

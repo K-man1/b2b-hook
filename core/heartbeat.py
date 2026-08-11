@@ -48,7 +48,7 @@ import time
 import urllib.error
 import urllib.request
 
-from . import VERSION, config, ledger, paths
+from . import VERSION, agents, config, ledger, paths
 
 STATE_NAME = "hackatime.json"
 STATE_VERSION = 1
@@ -82,9 +82,12 @@ DEFAULT_API_URL = "https://hackatime.hackclub.com/api/hackatime/v1"
 # Their parser reads a bare product name fine; several of their own regression
 # tests use `claude` with no version. `editor` is also sent explicitly below,
 # so recognition does not depend on this string being parsed correctly.
-PLUGIN_UA = "claude-code ai-attribution-wakatime/{}"
-
-EDITOR = "claude-code"
+#
+# Both of these used to be module constants naming Claude Code. They are now
+# per-heartbeat, resolved from the agent that recorded the bucket, because a
+# student can drive the same repo with more than one agent and a row that
+# named the wrong one would be a false statement about who wrote the line.
+# See core/agents.py.
 
 # NOT "coding". Hackatime's stats API takes `no_ai_coding=true`, which drops
 # `category = "ai coding"` out of every time total it reports
@@ -221,7 +224,7 @@ def _write(data):
 
 
 def record(rid, project, rel, ai_lines=0, human_lines=0, session_id="",
-           branch=None):
+           branch=None, agent=None):
     """Add one edit's line split to the open bucket for that file.
 
     Called from the edit hook, so it must stay cheap and must not touch the
@@ -239,10 +242,16 @@ def record(rid, project, rel, ai_lines=0, human_lines=0, session_id="",
     if not enabled():
         return
     now = time.time()
+    slug = (agent or agents.DEFAULT)
     with ledger.FileLock(state_path() + ".lock"):
         data = _load()
         for bucket in data["pending"]:
-            if bucket.get("rid") == rid and bucket.get("entity") == rel:
+            # The agent is part of the merge key, not just cargo. Two agents
+            # touching one file in one window are two different claims about
+            # authorship, and folding them together would attribute a block of
+            # Cursor's lines to whichever tool happened to open the bucket.
+            if (bucket.get("rid") == rid and bucket.get("entity") == rel
+                    and bucket.get("agent", agents.DEFAULT) == slug):
                 bucket["ai"] = bucket.get("ai", 0) + ai_lines
                 bucket["human"] = bucket.get("human", 0) + human_lines
                 bucket["time"] = now
@@ -258,6 +267,7 @@ def record(rid, project, rel, ai_lines=0, human_lines=0, session_id="",
                 "time": now,
                 "session": session_id,
                 "branch": branch,
+                "agent": slug,
             })
         if len(data["pending"]) > MAX_PENDING:
             data["pending"] = data["pending"][-MAX_PENDING:]
@@ -292,6 +302,10 @@ def build(bucket):
     collapse against the editor's own heartbeats for the same file, which is
     correct: they are genuinely different observations.
     """
+    # Buckets written before agents.py existed carry no `agent` key. They came
+    # from the only agent that could produce one, so defaulting is accurate
+    # rather than merely convenient.
+    identity = agents.resolve(bucket.get("agent"))
     hb = {
         "entity": bucket["entity"],
         "type": "file",
@@ -299,8 +313,8 @@ def build(bucket):
         "time": round(bucket["time"], 6),
         "is_write": True,
         "category": CATEGORY,
-        "editor": EDITOR,
-        "plugin": PLUGIN_UA.format(VERSION),
+        "editor": identity["editor"],
+        "plugin": agents.UA.format(identity["editor"], VERSION),
         "ai_line_changes": int(bucket.get("ai", 0)),
         "human_line_changes": int(bucket.get("human", 0)),
     }
@@ -329,7 +343,11 @@ def post(batch):
         headers={
             "Content-Type": "application/json",
             "Authorization": "Bearer " + api_key(),
-            "User-Agent": PLUGIN_UA.format(VERSION),
+            # Deliberately not the agent's name. One batch can carry rows from
+            # several agents, so the transport identifies the sender (this
+            # plugin) while each heartbeat's own `editor`/`plugin` field
+            # identifies who wrote that line.
+            "User-Agent": agents.UA.format("ai-attribution", VERSION),
         },
     )
     with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:

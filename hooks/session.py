@@ -187,8 +187,9 @@ def ledger_paths(ctx):
     return {r.get("path") for r in records if r.get("path")}
 
 
-def main():
-    payload = C.read_input()
+def main(payload=None):
+    if payload is None:
+        payload = C.read_input()
     ctx = C.context(payload)
     if ctx is None:
         # The only way to get here now is an opt-out, which is a deliberate

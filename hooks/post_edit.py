@@ -34,8 +34,16 @@ def load_pending(slot):
         return None
 
 
-def main():
-    payload = C.read_input()
+def main(payload=None):
+    """Attribute one edit.
+
+    The payload is a parameter rather than always being read from stdin so that
+    adapters for agents that do not speak Claude Code's hook schema can build
+    the same dict from argv or environment variables and reuse this logic
+    verbatim. Stdin stays the default, so the Claude Code path is unchanged.
+    """
+    if payload is None:
+        payload = C.read_input()
     ctx = C.context(payload)
     if ctx is None:
         return
@@ -99,7 +107,7 @@ def main():
         # path of every tool call.
         C.heartbeat.record(ctx["rid"], ctx["name"], rel,
                            ai_lines=raw, session_id=ctx["session_id"],
-                           branch=ctx["branch"])
+                           branch=ctx["branch"], agent=ctx["agent"])
 
 
 if __name__ == "__main__":

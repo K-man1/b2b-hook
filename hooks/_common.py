@@ -19,7 +19,7 @@ import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import (VERSION, config, counting, heartbeat,  # noqa: E402,F401
+from core import (VERSION, agents, config, counting, heartbeat,  # noqa: E402,F401
                   ledger, paths, provenance, registry, repoutil)
 
 
@@ -44,9 +44,9 @@ def context(payload):
     code in. Since that order ends in a folder-name fallback, the only way to
     get None here now is an opt-out.
 
-    `name` and `branch` are resolved once, here, because they must be identical
-    everywhere they are reported. The same work filed under two spellings would
-    land as two projects on Hackatime.
+    `name`, `branch` and `agent` are resolved once, here, because they must be
+    identical everywhere they are reported. The same work filed under two
+    spellings would land as two projects on Hackatime.
     """
     cwd = payload.get("cwd") or os.getcwd()
     root = repoutil.repo_root(cwd)
@@ -66,6 +66,7 @@ def context(payload):
         "branch": repoutil.project_branch(root),
         "ledger": paths.ledger_path(rid),
         "session_id": payload.get("session_id", ""),
+        "agent": agents.current(payload)["slug"],
     }
 
 
@@ -112,6 +113,11 @@ def emit(ctx, kind, **fields):
         "kind": kind,
         "ts": now_iso(),
         "session_id": ctx["session_id"],
+        # On every record, not only edits. An instructor reading the ledger has
+        # to be able to tell which agent produced a given claim, and attestation
+        # and drift records are the ones that establish whether an agent was
+        # even running at the time.
+        "agent": ctx["agent"],
         "v": VERSION,
     }
     body.update(fields)
@@ -166,7 +172,7 @@ def sync_drift(ctx, rel, current_text, current_lines):
              after_sha256=digest)
         heartbeat.record(ctx["rid"], ctx["name"], rel,
                          human_lines=raw, session_id=ctx["session_id"],
-                         branch=ctx["branch"])
+                         branch=ctx["branch"], agent=ctx["agent"])
     return current_lines, tags
 
 

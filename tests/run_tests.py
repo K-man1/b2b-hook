@@ -447,6 +447,113 @@ def test_band_is_measured_against_observed_code():
           report_mod.band(totals(0, 0, 0))["level"] == "unknown")
 
 
+def test_two_agents_are_not_merged_into_one_claim():
+    """A file touched by two agents must produce two heartbeats, not one.
+
+    This is the regression the agent-identity work introduced the risk of.
+    Buckets are keyed so an edit merges into an open bucket for the same file,
+    which is right for repeated edits by one agent and wrong across agents: it
+    would take Cursor's line count and file it under Claude Code, which is a
+    false statement about authorship rather than a rounding error.
+
+    Also pinned here: a bucket written before agent identity existed still
+    reports as claude-code, because at the time nothing else could have made it.
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["AIATTR_DATA_DIR"] = d
+        os.environ["AIATTR_HACKATIME"] = "1"
+        import importlib
+        from core import agents, heartbeat, paths
+        importlib.reload(paths); importlib.reload(heartbeat)
+
+        heartbeat.enabled = lambda: True
+
+        heartbeat.record("rid", "proj", "a.py", ai_lines=10, agent="claude-code")
+        heartbeat.record("rid", "proj", "a.py", ai_lines=5, agent="claude-code")
+        heartbeat.record("rid", "proj", "a.py", ai_lines=7, agent="cursor")
+
+        pending = heartbeat._load()["pending"]
+        check("same agent, same file merges into one bucket",
+              len([b for b in pending if b.get("agent") == "claude-code"]) == 1,
+              str(pending))
+        check("repeated edits by one agent accumulate",
+              [b for b in pending if b.get("agent") == "claude-code"][0]["ai"] == 15)
+        check("a second agent opens its own bucket",
+              len([b for b in pending if b.get("agent") == "cursor"]) == 1,
+              str(pending))
+
+        by_editor = {hb["editor"]: hb for hb in (heartbeat.build(b) for b in pending)}
+        check("each heartbeat names the agent that wrote it",
+              set(by_editor) == {"claude-code", "cursor"}, str(set(by_editor)))
+        check("the AI line split rides with the right agent",
+              by_editor["cursor"]["ai_line_changes"] == 7)
+        check("the plugin string names the agent too",
+              by_editor["cursor"]["plugin"].startswith("cursor "),
+              by_editor["cursor"]["plugin"])
+
+        legacy = {"entity": "b.py", "project": "proj", "time": 1.0,
+                  "ai": 3, "human": 0}
+        check("a bucket predating agent identity reports as claude-code",
+              heartbeat.build(legacy)["editor"] == "claude-code")
+        check("an unknown agent degrades instead of raising",
+              agents.resolve("some-new-tool")["editor"] == "some-new-tool")
+
+        del os.environ["AIATTR_DATA_DIR"]
+        del os.environ["AIATTR_HACKATIME"]
+
+
+def test_agent_hook_drives_a_non_claude_agent_end_to_end():
+    """A tool that only knows how to run a shell command with a file path must
+    produce the same ledger a Claude Code session would.
+
+    This is the path every non-Claude-Code adapter depends on, so it is tested
+    the way those tools actually call it: through argv, not by importing
+    _common and building a payload dict by hand. If build_payload ever drifted
+    from what post_edit.main() expects, a unit test on either half alone would
+    stay green while the real integration silently produced nothing.
+    """
+    import subprocess
+    import sys as _sys
+    import tempfile
+    from core import ledger as ledger_mod, paths
+
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["AIATTR_DATA_DIR"] = os.path.join(d, "data")
+        import importlib
+        importlib.reload(paths)
+
+        repo = os.path.join(d, "repo")
+        os.makedirs(repo)
+        subprocess.run(["git", "init", "-q"], cwd=repo, capture_output=True)
+        target = os.path.join(repo, "main.py")
+        with open(target, "w") as fh:
+            fh.write("print('agent wrote this')\n")
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        agent_hook = os.path.join(here, "..", "hooks", "agent_hook.py")
+        env = dict(os.environ)
+        result = subprocess.run(
+            [_sys.executable, agent_hook, "edit",
+             "--agent", "cursor", "--file", "main.py", "--cwd", repo],
+            capture_output=True, text=True, env=env,
+        )
+        check("agent_hook exits cleanly with no debug output",
+              result.returncode == 0, result.stderr)
+
+        rid = paths.repo_id(repo)
+        records, bad = ledger_mod.read_all(paths.ledger_path(rid))
+        check("the edit landed in the ledger", bool(records), str(records))
+        check("no unparseable records", bad == [], str(bad))
+        edits = [r for r in records if r.get("kind") in ("edit", "baseline")]
+        check("the record names the calling agent, not claude-code",
+              edits and edits[-1].get("agent") == "cursor",
+              str(edits[-1]) if edits else "none")
+
+        importlib.reload(paths)
+        del os.environ["AIATTR_DATA_DIR"]
+
+
 def main():
     import json as _json
     globals()["json"] = _json
@@ -460,6 +567,8 @@ def main():
     print("streaming outbox");      test_watermark_only_advances_on_acknowledgement()
     print("                 ");     test_debounce_lets_backlog_through()
     print("privacy / opt-out");     test_opt_out_is_not_reported(); test_remote_credentials_stripped()
+    print("agent identity");        test_two_agents_are_not_merged_into_one_claim()
+    print("agent_hook adapter");    test_agent_hook_drives_a_non_claude_agent_end_to_end()
     print()
     print("{} passed, {} failed".format(len(PASS), len(FAIL)))
     return 1 if FAIL else 0

@@ -18,7 +18,9 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from core import config, registry  # noqa: E402
+from core import adapters, agents, config, registry  # noqa: E402
+
+PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 VERSION = "0.6.0"
 
@@ -164,6 +166,114 @@ def cmd_ignore(args):
     return 0
 
 
+def _merge_json_hooks(path, new_hooks):
+    """Add hook entries without clobbering a config file the tool already owns.
+
+    Cursor, Codex, Gemini CLI etc. all use their hooks.json/settings.json for
+    more than hooks, so this is a merge, not an overwrite. Merge key is the
+    exact command string: re-running install-hooks after a plugin update must
+    not pile up duplicate entries, but a genuinely different command (the
+    plugin moved, or the student edited the file by hand) is left alone rather
+    than guessed about.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            existing = json.load(fh)
+    except (OSError, ValueError):
+        existing = {}
+    if not isinstance(existing, dict):
+        existing = {}
+    merged_hooks = dict(existing.get("hooks") or {})
+    for event, entries in new_hooks.get("hooks", {}).items():
+        current = list(merged_hooks.get(event) or [])
+        for entry in entries:
+            if entry not in current:
+                current.append(entry)
+        merged_hooks[event] = current
+    existing.update({k: v for k, v in new_hooks.items() if k != "hooks"})
+    existing["hooks"] = merged_hooks
+    return existing
+
+
+def _write_json(path, data):
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh, indent=2, sort_keys=True)
+        fh.write("\n")
+
+
+def cmd_install_hooks(args):
+    if args.tool == "list":
+        print("Claude Code is wired in automatically; nothing to install for it.")
+        print()
+        for slug in adapters.known():
+            if slug in adapters.CLAUDE_SHAPED:
+                how = "config: " + adapters.CLAUDE_SHAPED[slug]["config"][0]
+            elif slug in adapters.CUSTOM:
+                how = "config: " + adapters.CUSTOM[slug]["config"][0]
+                if adapters.CUSTOM[slug].get("unverified"):
+                    how += "  (schema unverified -- check after install)"
+            elif slug in adapters.SCRIPT:
+                how = "script files in: " + adapters.SCRIPT[slug]["dir"]
+            else:
+                how = "not supported: " + adapters.UNSUPPORTED[slug]
+            label = (adapters.CLAUDE_SHAPED.get(slug) or adapters.CUSTOM.get(slug)
+                     or adapters.SCRIPT.get(slug) or {}).get(
+                "label", adapters.UNSUPPORTED_LABELS.get(slug, slug))
+            print("  {:<20} {}".format(slug, label))
+            print("      {}".format(how))
+        return 0
+
+    root = args.project or os.getcwd()
+    slug = agents.resolve(args.tool)["slug"]
+
+    if slug in adapters.UNSUPPORTED:
+        print("{}: {}".format(slug, adapters.UNSUPPORTED[slug]))
+        return 1
+
+    if slug in adapters.CLAUDE_SHAPED:
+        spec = adapters.CLAUDE_SHAPED[slug]
+        rel_path, _ = spec["config"]
+        path = os.path.join(root, rel_path)
+        new_hooks = adapters.build_claude_shaped(spec, PLUGIN_ROOT, slug)
+        _write_json(path, _merge_json_hooks(path, new_hooks))
+        print("Wrote {}".format(path))
+        return 0
+
+    if slug in adapters.CUSTOM:
+        spec = adapters.CUSTOM[slug]
+        rel_path, _ = spec["config"]
+        path = os.path.join(root, rel_path)
+        new_hooks = spec["build"](PLUGIN_ROOT, slug)
+        _write_json(path, _merge_json_hooks(path, new_hooks))
+        print("Wrote {}".format(path))
+        if spec.get("unverified"):
+            print("Note: {}'s exact hook payload fields are not published. "
+                  "If edits from it never show up in `aiattr.py status`, "
+                  "run it once with AIATTR_DEBUG=1 set and check stderr.".format(slug))
+        return 0
+
+    if slug in adapters.SCRIPT:
+        spec = adapters.SCRIPT[slug]
+        hook_dir = os.path.join(root, spec["dir"])
+        os.makedirs(hook_dir, exist_ok=True)
+        for event_name, verb in spec["events"].items():
+            script_path = os.path.join(hook_dir, event_name)
+            with open(script_path, "w", encoding="utf-8") as fh:
+                fh.write("#!/usr/bin/env bash\n")
+                fh.write('exec bash "{}" "{}" {} --agent {}\n'.format(
+                    os.path.join(PLUGIN_ROOT, "hooks", "py.sh"),
+                    os.path.join(PLUGIN_ROOT, "hooks", "agent_hook.py"),
+                    verb, slug))
+            os.chmod(script_path, 0o755)
+            print("Wrote {}".format(script_path))
+        return 0
+
+    print("Unknown agent '{}'. Run `install-hooks list` to see what's "
+          "supported.".format(args.tool))
+    return 1
+
+
 def cmd_flush(args):
     """Send any ledger records the server has not acknowledged yet.
 
@@ -242,11 +352,16 @@ def main():
     f = sub.add_parser("flush", help="deliver any undelivered ledger records")
     f.add_argument("path", nargs="?", help="repository (default: current directory)")
 
+    h = sub.add_parser("install-hooks",
+                       help="wire up an agent other than Claude Code")
+    h.add_argument("tool", help="agent slug (e.g. cursor, codex), or 'list'")
+    h.add_argument("--project", help="repo to install into (default: current directory)")
+
     args = ap.parse_args()
     handlers = {
         "status": cmd_status, "configure": cmd_configure,
         "projects": cmd_projects, "ignore": cmd_ignore, "sync": cmd_sync,
-        "flush": cmd_flush,
+        "flush": cmd_flush, "install-hooks": cmd_install_hooks,
     }
     if args.cmd not in handlers:
         ap.print_help()

@@ -28,8 +28,9 @@ def pending_slot(ctx, payload):
     return os.path.join(C.paths.pending_dir(ctx["rid"]), safe + ".json")
 
 
-def main():
-    payload = C.read_input()
+def main(payload=None):
+    if payload is None:
+        payload = C.read_input()
     ctx = C.context(payload)
     if ctx is None:
         return
