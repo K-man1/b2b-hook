@@ -38,19 +38,25 @@ def settings_fingerprint(root):
     """
     relevant = {}
     disabled = False
+    # Scope is part of the key. It used to be derived from the last two path
+    # components, which spells `.claude/settings.json` for the user-level file
+    # AND for the project-level one, so the project file silently overwrote the
+    # user file in this dict. The fingerprint then covered only one of the two
+    # places hooks can be turned off, and a change in the shadowed file did not
+    # move the hash at all.
     candidates = [
-        os.path.expanduser("~/.claude/settings.json"),
-        os.path.expanduser("~/.claude/settings.local.json"),
-        os.path.join(root, ".claude", "settings.json"),
-        os.path.join(root, ".claude", "settings.local.json"),
+        ("user", os.path.expanduser("~/.claude/settings.json")),
+        ("user", os.path.expanduser("~/.claude/settings.local.json")),
+        ("project", os.path.join(root, ".claude", "settings.json")),
+        ("project", os.path.join(root, ".claude", "settings.local.json")),
     ]
-    for path in candidates:
+    for scope, path in candidates:
         try:
             with open(path, "r", encoding="utf-8") as fh:
                 data = json.load(fh)
         except (OSError, ValueError):
             continue
-        key = os.path.basename(os.path.dirname(path)) + "/" + os.path.basename(path)
+        key = scope + "/" + os.path.basename(path)
         relevant[key] = {
             "hooks": data.get("hooks"),
             "disableAllHooks": data.get("disableAllHooks"),
@@ -115,26 +121,66 @@ def migrate_legacy():
 
 
 def clean_pending(ctx):
-    """Drop handoff files from edits whose PostToolUse never fired."""
-    directory = C.paths.pending_dir(ctx["rid"])
+    """Drop handoff files from edits whose PostToolUse never fired.
+
+    Every repo's directory, not just this one's. Sweeping only the current rid
+    meant a handoff file left behind in a project the student never opened
+    again was never collected, and each one holds a full copy of a source file.
+    The plugin follows a student into every folder they work in, so "some other
+    repo will clean it up" is not a thing that happens.
+    """
     cutoff = time.time() - PENDING_MAX_AGE
+    base = os.path.dirname(C.paths.pending_dir(ctx["rid"]))
     try:
-        names = os.listdir(directory)
+        rids = os.listdir(base)
     except OSError:
         return
-    for name in names:
-        path = os.path.join(directory, name)
+    for rid in rids:
+        directory = os.path.join(base, rid)
         try:
-            if os.path.getmtime(path) < cutoff:
-                os.unlink(path)
+            names = os.listdir(directory)
+        except OSError:
+            continue
+        for name in names:
+            path = os.path.join(directory, name)
+            try:
+                if os.path.getmtime(path) < cutoff:
+                    os.unlink(path)
+            except OSError:
+                pass
+        try:
+            os.rmdir(directory)  # only succeeds once it is empty
         except OSError:
             pass
 
 
 def sweep(ctx):
-    """Compare every tracked file against its snapshot."""
+    """Compare every tracked file against its snapshot.
+
+    A file with no snapshot is not automatically pre-existing code, and
+    treating it that way lost most of the student's work. `unobserved` is
+    supposed to mean "was already here before the plugin was", but it was
+    assigned to *any* file without a snapshot, including one the student
+    created by hand yesterday in a repo this has been watching for a month.
+    Since a hand-written file is usually a whole new file rather than an edit
+    to an existing one, that was the common case, not an edge: writing ten
+    files by hand next to two the agent wrote reported 100% AI.
+
+    So the three cases are separated by what the ledger already knows:
+
+        repo never seen before   genuinely pre-existing. `unobserved`.
+        path seen, snapshot gone the state directory was wiped. Reportable,
+                                 and re-baselined rather than guessed at.
+        repo seen, path new      appeared while this repo was being tracked,
+                                 with no tool call to explain it. Same
+                                 inference drift already makes: the student.
+    """
     drifted = baselined = reset = 0
-    known_paths = ledger_paths(ctx)
+    records, _bad = C.ledger.read_all(ctx["ledger"])
+    known_paths = {r.get("path") for r in records if r.get("path")}
+    # Any prior record at all means this repo has been through a session
+    # before, so a file that is new to the snapshot store is new to the repo.
+    repo_seen_before = bool(records)
 
     for rel in C.repoutil.tracked_files(ctx["root"]):
         if C.counting.is_excluded(rel):
@@ -148,16 +194,27 @@ def sweep(ctx):
         digest = C.provenance.sha256_text(text)
 
         if snap is None:
-            tags = C.provenance.baseline_tags(lines)
-            C.provenance.save_snapshot(snap_file, lines, tags, digest)
             # A file the ledger has history for, but whose snapshot is gone,
             # means the plugin's state directory was deleted. That is a
             # reportable event: it destroys prior attribution.
             if rel in known_paths:
+                C.provenance.save_snapshot(
+                    snap_file, lines, C.provenance.baseline_tags(lines), digest)
                 C.emit(ctx, "baseline_reset", path=rel, lines=len(lines),
                        after_sha256=digest)
                 reset += 1
+            elif repo_seen_before:
+                tags = [C.provenance.TAG_HUMAN] * len(lines)
+                C.provenance.save_snapshot(snap_file, lines, tags, digest)
+                mask = C.counting.significant_mask(lines, rel)
+                sig = sum(1 for i in range(len(lines)) if i < len(mask) and mask[i])
+                C.emit(ctx, "drift", path=rel, via="new_file",
+                       lines_human=len(lines), sig_human=sig, lines_removed=0,
+                       file_lines=len(lines), after_sha256=digest)
+                drifted += 1
             else:
+                C.provenance.save_snapshot(
+                    snap_file, lines, C.provenance.baseline_tags(lines), digest)
                 baselined += 1
             continue
 
@@ -172,7 +229,7 @@ def sweep(ctx):
         raw, sig = C.provenance.score(new_idx, mask)
         C.provenance.save_snapshot(snap_file, lines, tags, digest)
         if raw or removed:
-            C.emit(ctx, "drift", path=rel,
+            C.emit(ctx, "drift", path=rel, via="drift",
                    lines_human=raw, sig_human=sig, lines_removed=removed,
                    file_lines=len(lines), after_sha256=digest)
             drifted += 1
@@ -180,23 +237,25 @@ def sweep(ctx):
     return drifted, baselined, reset
 
 
-def ledger_paths(ctx):
-    """Every path the ledger has ever recorded, to tell a first run apart from
-    a wiped state directory."""
-    records, _ = C.ledger.read_all(ctx["ledger"])
-    return {r.get("path") for r in records if r.get("path")}
-
-
 def main(payload=None):
     if payload is None:
         payload = C.read_input()
     ctx = C.context(payload)
     if ctx is None:
-        # The only way to get here now is an opt-out, which is a deliberate
-        # choice, so stay quiet about it. There used to be a warning here for
-        # folders that were not git repositories; wakatime-cli falls back to the
-        # folder name rather than refusing, this now does the same, and so the
-        # case the warning existed for cannot happen.
+        # An opt-out is a deliberate choice, so stay quiet about it. A folder
+        # the detector refuses is not, and staying quiet about that one was a
+        # hole: repoutil._CONTAINER_DIRS blocks the folder-name fallback for
+        # `code`, `dev`, `src`, `projects` and `workspace` directly under $HOME,
+        # which are the exact names people keep code in. Working in an ungit'd
+        # ~/code recorded nothing at all and said nothing about it, so a student
+        # could believe they were tracked for weeks. Say so once per session and
+        # give the two fixes.
+        if C.skip_reason(payload) == "unresolvable":
+            print(json.dumps({"systemMessage":
+                              "AI attribution: this folder is not tracked, because a "
+                              "directory like ~/code or ~/projects is treated as a place "
+                              "projects live rather than as one. Run `git init` here, or "
+                              "add a .wakatime-project file, to start recording."}))
         return
 
     migrate_legacy()
@@ -228,6 +287,8 @@ def main(payload=None):
                       band=report_mod.band(data.get("totals", {})),
                       path=ctx["root"])
     fingerprint, disabled = settings_fingerprint(ctx["root"])
+    coverage = data.get("coverage", {})
+    _records, bad_lines = C.ledger.read_all(ctx["ledger"])
 
     C.emit(ctx, "attestation",
            plugin_version=C.VERSION,
@@ -236,6 +297,23 @@ def main(payload=None):
            files_drifted=drifted,
            files_baselined=baselined,
            files_reset=reset,
+           # Everything below is a way for code to leave the ratio quietly, so
+           # each one is stated rather than left to be inferred from a total
+           # that looks smaller than it should.
+           files_excluded=coverage.get("files_excluded", 0),
+           bytes_excluded=coverage.get("bytes_excluded", 0),
+           files_unreadable=coverage.get("files_unreadable", 0),
+           # A ledger with unparseable lines in it is worth saying out loud.
+           # read_all has always returned these and nothing has ever looked at
+           # them, so local corruption was invisible until it became a delivery
+           # failure with no explanation attached.
+           ledger_bad_lines=len(bad_lines),
+           # The data directory is overridable by environment variable, and
+           # pointing it somewhere fresh is a complete, silent opt-out: no
+           # config, so no reporting, and no history, so no gap to notice.
+           # Recording that it moved does not prevent that, but it means the
+           # move is a fact on the record instead of an absence.
+           data_dir_default=(os.environ.get("AIATTR_DATA_DIR") is None),
            start_reason=payload.get("reason", ""))
 
     if reset:

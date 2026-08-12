@@ -20,13 +20,20 @@ SCRIPT -- Cline. Not a config entry at all: a hook is a single executable
 file whose *name* is the event (e.g. `.clinerules/hooks/PostToolUse`), no
 JSON wrapper.
 
+PLUGIN -- opencode. No declarative hook entry exists at all; its hooks are a
+JavaScript module. So there is nothing to generate, and instead a plugin
+file that lives in the repo (assets/opencode/aiattr.js) is copied into place
+with the absolute hook paths substituted in. Shipping that file rather than
+generating it is the point: generated code is code nobody reads, and this is
+the only adapter whose payload is a program.
+
 Deliberately absent, and why, because the omission is easy to mistake for an
 oversight otherwise:
   - Trae, Roo Code, Sourcegraph Cody: no shell-command hook exists. Verified
     against their own docs / issue trackers, not inferred from silence.
-  - opencode, Amp: hooks exist but require real JS/TS plugin code, not a
-    declarative "run this shell command" entry. install-hooks does not write
-    code in a language this plugin has no other footprint in.
+  - Amp: hooks exist but reaching a shell command requires writing a JS
+    plugin, and unlike opencode its plugin API is not documented well enough
+    to ship one against.
   - VSCodium: an editor, not an agent. An AI extension running inside it
     (Cline, Copilot, ...) is covered by that extension's own entry; the host
     adds no separate hook surface.
@@ -41,6 +48,7 @@ generated config omits `matcher` rather than guessing a tool-specific tool
 name, because the failure mode of "too broad" is the safe one.
 """
 
+import json
 import os
 
 # SCOPE. `user` is a path relative to $HOME that the tool reads for EVERY
@@ -234,9 +242,28 @@ SCRIPT = {
     },
 }
 
+# opencode. The whole adapter is a file rather than a dict, because its hook
+# surface is a JS module and not a config entry -- see the PLUGIN note at the
+# top. `asset` is relative to the plugin root so it survives the install being
+# moved; `token` names the placeholders render_plugin_asset fills in.
+#
+# Paths confirmed against opencode's own plugin docs (2026-08): both
+# directories are `plugins`, plural, and every .js/.ts file in them is loaded
+# at startup with no registration step. Project-level plugins load after
+# global ones, so a repo that installs its own copy simply runs a second time
+# -- harmless, since agent_hook.py's records are keyed by path and content.
+PLUGIN = {
+    "opencode": {
+        "label": "opencode",
+        "asset": ("assets", "opencode", "aiattr.js"),
+        "config": (".opencode/plugins/aiattr.js", None),
+        "user": ".config/opencode/plugins/aiattr.js",
+    },
+}
+
 UNSUPPORTED_LABELS = {
     "trae": "Trae", "roo-code": "Roo Code", "cody": "Cody",
-    "opencode": "opencode", "amp": "Amp", "vscodium": "VSCodium",
+    "amp": "Amp", "vscodium": "VSCodium",
 }
 
 UNSUPPORTED = {
@@ -249,11 +276,9 @@ UNSUPPORTED = {
                 "read after the fact instead of observed live.",
     "cody": "No hook mechanism found in current docs; Cody Individual is "
             "deprecated (Enterprise-only since 2025-07).",
-    "opencode": "Hooks exist but are real TypeScript/JS plugin code "
-                "(tool.execute.after), not a declarative shell-command entry. "
-                "install-hooks does not generate plugin code.",
     "amp": "No documented declarative 'run this shell command' hook action; "
-           "reaching a shell command requires writing a JS plugin.",
+           "reaching a shell command requires writing a JS plugin, and Amp's "
+           "plugin API is not documented well enough to ship one against.",
     "vscodium": "An editor, not an agent -- nothing writes code here on its "
                 "own. Whatever AI extension runs inside it (Cline, Copilot, "
                 "...) is covered by that extension's own adapter.",
@@ -262,7 +287,40 @@ UNSUPPORTED = {
 
 def spec_for(slug):
     """The adapter spec for a slug, or None if it has no hook support."""
-    return CLAUDE_SHAPED.get(slug) or CUSTOM.get(slug) or SCRIPT.get(slug)
+    return (CLAUDE_SHAPED.get(slug) or CUSTOM.get(slug) or SCRIPT.get(slug)
+            or PLUGIN.get(slug))
+
+
+def render_plugin_asset(spec, plugin_root):
+    """The plugin file's source with this install's real paths baked in.
+
+    Substitution rather than string-building for the same reason the asset is
+    a file rather than a generated string: the thing that runs on a student's
+    machine should be a file someone can read, diff, and lint in this repo,
+    not JavaScript assembled by a Python function.
+
+    The paths are inserted via json.dumps, which is not decoration -- a JSON
+    string literal is a JavaScript string literal, so a Windows install path
+    full of backslashes survives instead of turning into escape sequences.
+    """
+    path = os.path.join(plugin_root, *spec["asset"])
+    with open(path, "r", encoding="utf-8") as fh:
+        source = fh.read()
+
+    replacements = {
+        '"__AIATTR_PY_SH__"': os.path.join(plugin_root, "hooks", "py.sh"),
+        '"__AIATTR_AGENT_HOOK__"': os.path.join(
+            plugin_root, "hooks", "agent_hook.py"),
+    }
+    for token, value in replacements.items():
+        if token not in source:
+            # An asset that no longer carries the placeholder would install
+            # cleanly and then run against a literal "__AIATTR_PY_SH__", doing
+            # nothing forever. Loud here beats silent there.
+            raise ValueError(
+                "{} is missing the {} placeholder".format(path, token))
+        source = source.replace(token, json.dumps(value))
+    return source
 
 
 def user_scope_path(spec):
@@ -333,4 +391,5 @@ def enable_codex_hooks(config_path):
 
 def known():
     """Every agent slug this module has an opinion about, sorted."""
-    return sorted(set(CLAUDE_SHAPED) | set(CUSTOM) | set(SCRIPT) | set(UNSUPPORTED))
+    return sorted(set(CLAUDE_SHAPED) | set(CUSTOM) | set(SCRIPT) | set(PLUGIN)
+                  | set(UNSUPPORTED))

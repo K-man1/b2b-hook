@@ -414,6 +414,11 @@ def test_band_is_measured_against_observed_code():
     The denominator is the whole point. Scoring AI against every line in the
     project would report a repo that was 90% written before tracking started as
     barely-any-AI, when in fact nobody knows what that 90% was.
+
+    The other half of that decision lives in provenance.py: drift stays tagged
+    `human` so this denominator has two populated sides. A hook cannot watch a
+    person type, so restricting `human` to directly observed authorship empties
+    it, and `ai / (ai + human)` becomes `ai / ai`. The case below pins that.
     """
     from core import report as report_mod
 
@@ -438,6 +443,12 @@ def test_band_is_measured_against_observed_code():
     # ...but coverage that thin has to be visible, not silently folded in.
     check("thin coverage is reported alongside it",
           b["observed_pct_of_project"] == round(100 * 120 / 1020.0, 1))
+
+    # An empty `human` bucket makes this ratio meaningless, which is why drift
+    # is attributed rather than left unobserved. If a future change stops
+    # populating `human`, this is the test that should fail first.
+    check("with no human lines at all the ratio degenerates to 100%",
+          report_mod.band(totals(80, 0, 20))["ai_pct_of_observed"] == 100.0)
 
     check("a barely-tracked project refuses to be labelled",
           report_mod.band(totals(3, 0, 5000))["level"] == "unknown")
@@ -646,10 +657,130 @@ def test_hooks_install_machine_wide_by_default():
     # Guard the table itself: a `user` path that is absolute or escapes home
     # would be written to the wrong place entirely.
     bad = [s for s, spec in list(adapters.CLAUDE_SHAPED.items())
-           + list(adapters.CUSTOM.items())
+           + list(adapters.CUSTOM.items()) + list(adapters.PLUGIN.items())
            if spec.get("user") and (os.path.isabs(spec["user"])
                                     or ".." in spec["user"])]
     check("every user-level path is home-relative", bad == [], str(bad))
+
+
+OPENCODE_DRIVER = """\
+// Calls the installed plugin the way opencode does: load the module, call the
+// exported factory, then fire the tool hooks around a write.
+import { writeFileSync } from "node:fs"
+
+const [pluginPath, repo, file] = process.argv.slice(2)
+const mod = await import(pluginPath)
+const factory = Object.values(mod).find((v) => typeof v === "function")
+const hooks = await factory({ directory: repo, worktree: repo })
+
+// A read carries a filePath too, and must not be recorded as authorship.
+await hooks["tool.execute.before"](
+  { tool: "read", callID: "r1", sessionID: "s1" }, { args: { filePath: file } })
+await hooks["tool.execute.after"](
+  { tool: "read", callID: "r1", sessionID: "s1" },
+  { title: file, output: "", metadata: {} })
+
+const input = { tool: "edit", callID: "c1", sessionID: "s1" }
+await hooks["tool.execute.before"](input, { args: { filePath: file } })
+writeFileSync(file, "def main():\\n    print('written by opencode')\\n")
+// No `args` on the after hook: older opencode did not send them, so the path
+// has to survive from the before hook.
+await hooks["tool.execute.after"](input, { title: file, output: "ok", metadata: {} })
+"""
+
+
+def test_opencode_plugin_records_the_same_way_a_config_hook_would():
+    """opencode's adapter is a JavaScript file, so nothing about it is covered
+    by the tests that check generated JSON.
+
+    Two halves, and both have failed in ways that look like success. The
+    install half: a placeholder left unsubstituted writes a plugin that runs
+    `bash "__AIATTR_PY_SH__"` on every edit forever, silently. The runtime
+    half: the pre-edit hook has to finish before opencode performs the write,
+    or the before-image is the after-image and the agent's own lines are
+    diffed against themselves and credited to nobody.
+
+    The runtime half needs a JS runtime, so it is skipped where there is none
+    rather than failing -- the plugin's own machines all have one, since
+    opencode itself is a Bun program.
+    """
+    import shutil
+    import subprocess
+    import sys as _sys
+    import tempfile
+    from core import adapters, ledger as ledger_mod, paths
+
+    cli = os.path.join(ROOT, "cli", "aiattr.py")
+
+    with tempfile.TemporaryDirectory() as home:
+        env = dict(os.environ)
+        env["HOME"] = home
+        env["AIATTR_DATA_DIR"] = os.path.join(home, "data")
+
+        r = subprocess.run([_sys.executable, cli, "install-hooks", "opencode"],
+                           capture_output=True, text=True, env=env, cwd=home)
+        installed = os.path.join(home, ".config", "opencode", "plugins",
+                                 "aiattr.js")
+        check("opencode's plugin installs machine-wide, like every other tool",
+              r.returncode == 0 and os.path.isfile(installed),
+              r.stdout + r.stderr)
+        if not os.path.isfile(installed):
+            return
+
+        with open(installed) as fh:
+            source = fh.read()
+        check("no placeholder survives into the installed plugin",
+              "__AIATTR_" not in source, source[:400])
+        check("and it points at this install's real hook paths",
+              os.path.join(ROOT, "hooks", "agent_hook.py") in source
+              or json.dumps(os.path.join(ROOT, "hooks", "agent_hook.py"))[1:-1]
+              in source,
+              source[:400])
+
+        runtime = shutil.which("bun") or shutil.which("node")
+        if not runtime:
+            print("  skip no JS runtime, plugin behaviour not exercised")
+            return
+
+        repo = os.path.join(home, "repo")
+        os.makedirs(repo)
+        subprocess.run(["git", "init", "-q"], cwd=repo, capture_output=True)
+        target = os.path.join(repo, "main.py")
+        with open(target, "w") as fh:
+            fh.write("def main():\n    print('hand written')\n")
+
+        driver = os.path.join(home, "driver.mjs")
+        with open(driver, "w") as fh:
+            fh.write(OPENCODE_DRIVER)
+        r = subprocess.run([runtime, driver, installed, repo, target],
+                           capture_output=True, text=True, env=env, cwd=repo)
+        check("the plugin runs clean under a real JS runtime",
+              r.returncode == 0, r.stdout + r.stderr)
+
+        import importlib
+        os.environ["AIATTR_DATA_DIR"] = env["AIATTR_DATA_DIR"]
+        importlib.reload(paths)
+        rid = paths.repo_id(repo)
+        records, bad = ledger_mod.read_all(paths.ledger_path(rid))
+        edits = [x for x in records if x.get("kind") == "edit"]
+        check("the write landed as one edit, credited to opencode",
+              len(edits) == 1 and edits[0].get("agent") == "opencode"
+              and bad == [],
+              str(records))
+        # One line changed. Anything higher means the before-image was captured
+        # after the write, which is the bug this ordering exists to prevent.
+        check("only the line opencode changed is credited to it",
+              edits and edits[0].get("lines_ai") == 1,
+              str(edits[0]) if edits else "no edit record")
+
+        del os.environ["AIATTR_DATA_DIR"]
+        importlib.reload(paths)
+
+    # The asset has to ship with the install or install-hooks writes nothing.
+    spec = adapters.PLUGIN["opencode"]
+    check("the plugin asset is in the repo, where install.sh will copy it",
+          os.path.isfile(os.path.join(ROOT, *spec["asset"])),
+          str(spec["asset"]))
 
 
 def main():
@@ -668,6 +799,7 @@ def main():
     print("agent identity");        test_two_agents_are_not_merged_into_one_claim()
     print("agent_hook adapter");    test_agent_hook_drives_a_non_claude_agent_end_to_end()
     print("hook install scope");    test_hooks_install_machine_wide_by_default()
+    print("opencode plugin");       test_opencode_plugin_records_the_same_way_a_config_hook_would()
     print()
     print("{} passed, {} failed".format(len(PASS), len(FAIL)))
     return 1 if FAIL else 0

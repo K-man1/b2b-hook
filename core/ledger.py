@@ -38,6 +38,10 @@ class LockTimeout(Exception):
     pass
 
 
+class _ChainUnreadable(Exception):
+    """A ledger with content in it that yielded no recoverable record."""
+
+
 class FileLock:
     """Cross-platform advisory lock built on O_CREAT|O_EXCL.
 
@@ -55,10 +59,13 @@ class FileLock:
     def __enter__(self):
         start = time.time()
         delay = 0.01
+        # Written into the lockfile and checked again on release. Two hooks
+        # racing is the normal case here, not the exotic one.
+        self._token = "{}:{}".format(os.getpid(), time.time())
         while True:
             try:
                 fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-                os.write(fd, str(os.getpid()).encode("ascii"))
+                os.write(fd, self._token.encode("ascii"))
                 os.close(fd)
                 self._held = True
                 return self
@@ -81,10 +88,22 @@ class FileLock:
 
     def __exit__(self, *exc):
         if self._held:
+            # Only remove the lock if it is still ours. Without this check the
+            # stale-breaking path above is unsafe: a slow holder whose lock got
+            # broken at the 120s mark would, on finishing, delete the lockfile
+            # belonging to whoever took over, and a third process could then
+            # enter while that one was still writing. Two concurrent appends
+            # corrupt the chain, and a corrupt chain reads as tampering.
             try:
-                os.unlink(self.path)
+                with open(self.path, "r", encoding="ascii") as fh:
+                    mine = fh.read() == self._token
             except OSError:
-                pass
+                mine = False
+            if mine:
+                try:
+                    os.unlink(self.path)
+                except OSError:
+                    pass
             self._held = False
         return False
 
@@ -107,11 +126,27 @@ def record_hash(body):
 
 
 def _tail_record(path):
-    """Last record in the log, without reading the whole file.
+    """Last usable record in the log, without reading the whole file.
 
     Reads a trailing window rather than the full ledger because this runs on
     every single edit; an O(file) read per keystroke-sized change would grow
     into a noticeable stall over a semester.
+
+    Raises _ChainUnreadable rather than returning None when the file has
+    content but no record can be recovered from it. That distinction is the
+    whole point of this function's contract: None means "empty ledger, start
+    the chain at zero", and returning it for a *damaged* ledger was a bug bad
+    enough to be an attack.
+
+    A single unparseable trailing line -- one torn write, one stray byte, one
+    `echo x >> ledger.jsonl` -- made this return None, so `append` restarted at
+    seq 0 with a genesis prev_hash. Two things then went wrong at once. The
+    server, which already held records at those sequence numbers, saw different
+    hashes offered for seqs it had stored, which is precisely its definition of
+    a rewritten stream. And the outbox watermark was already past those
+    numbers, so every subsequent record counted as delivered and none was ever
+    sent again. Real work stopped being reported, with an apparent tamper as
+    the only trace.
     """
     try:
         size = os.path.getsize(path)
@@ -124,17 +159,28 @@ def _tail_record(path):
         with open(path, "rb") as fh:
             fh.seek(size - window)
             chunk = fh.read(window)
-    except OSError:
-        return None
+    except OSError as exc:
+        raise _ChainUnreadable(path) from exc
     lines = [ln for ln in chunk.split(b"\n") if ln.strip()]
-    if not lines:
-        return None
-    # If the window started mid-record the first line is a fragment, but we
-    # only ever use the last one, which is always complete.
-    try:
-        return json.loads(lines[-1].decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
-        return None
+
+    # Backwards, not just the final line. A crash between write and fsync can
+    # leave a partial record at the end; the records before it are intact and
+    # are what the chain should continue from.
+    for line in reversed(lines):
+        try:
+            rec = json.loads(line.decode("utf-8"))
+        except (ValueError, UnicodeDecodeError):
+            continue
+        if isinstance(rec, dict) and "seq" in rec:
+            return rec
+
+    # Nothing usable in the window. The window may simply have started inside
+    # one enormous record, so re-read the whole file before concluding damage.
+    records, _bad = read_all(path)
+    for rec in reversed(records):
+        if isinstance(rec, dict) and "seq" in rec:
+            return rec
+    raise _ChainUnreadable(path)
 
 
 def append(ledger_file, body):
@@ -147,14 +193,35 @@ def append(ledger_file, body):
     os.makedirs(directory, exist_ok=True)
     lock = FileLock(ledger_file + ".lock")
     with lock:
-        last = _tail_record(ledger_file)
+        restarted = False
+        try:
+            last = _tail_record(ledger_file)
+        except _ChainUnreadable:
+            # Unrecoverable, so the chain has to start over -- but silently
+            # renumbering from zero is what makes a damaged ledger look like a
+            # rewritten one. Move the wreckage aside so it can still be
+            # inspected, and mark the first record of the new chain as a
+            # restart. A declared discontinuity is a fact the server can act
+            # on; an undeclared one is indistinguishable from tampering.
+            try:
+                os.replace(ledger_file, "{}.damaged.{}".format(
+                    ledger_file, int(time.time())))
+            except OSError:
+                pass
+            last, restarted = None, True
+
         if last is None:
             seq, prev = 0, GENESIS
         else:
-            seq = int(last.get("seq", -1)) + 1
+            try:
+                seq = int(last.get("seq", -1)) + 1
+            except (TypeError, ValueError):
+                seq, restarted = 0, True
             prev = last.get("hash", GENESIS)
 
         rec = dict(body)
+        if restarted:
+            rec["chain_restarted"] = True
         rec["seq"] = seq
         rec["prev_hash"] = prev
         rec["hash"] = record_hash(rec)
@@ -165,6 +232,27 @@ def append(ledger_file, body):
             fh.flush()
             os.fsync(fh.fileno())
     return rec
+
+
+def head_seq(ledger_file):
+    """The highest seq on disk, or -1 for an empty or unreadable ledger.
+
+    Exists so callers that only need "how far along is this log" do not have to
+    parse the whole thing. `unsent` reads every record because it has to return
+    them; the debounce check on the edit path only needs a count, and paying a
+    full-file parse for it on every single tool call is a cost that grows with
+    the semester.
+    """
+    try:
+        last = _tail_record(ledger_file)
+    except _ChainUnreadable:
+        return -1
+    if not last:
+        return -1
+    try:
+        return int(last.get("seq", -1))
+    except (TypeError, ValueError):
+        return -1
 
 
 def read_all(ledger_file):

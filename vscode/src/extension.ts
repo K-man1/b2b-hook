@@ -128,15 +128,15 @@ function record(doc: vscode.TextDocument, touched: Map<number, Origin>) {
   if (!rel || rel.startsWith("..") || isExcluded(rel)) return;
 
   const now = Date.now();
-  const existing = pending.find(
+  let bucket = pending.find(
     (b) => b.project === project.name && b.entity === rel,
   );
-  if (existing) {
-    for (const [line, origin] of touched) existing.origins.set(line, origin);
-    existing.lines = doc.lineCount;
-    existing.time = now;
+  if (bucket) {
+    for (const [line, origin] of touched) bucket.origins.set(line, origin);
+    bucket.lines = doc.lineCount;
+    bucket.time = now;
   } else {
-    pending.push({
+    bucket = {
       project: project.name,
       branch: project.branch,
       entity: rel,
@@ -144,11 +144,38 @@ function record(doc: vscode.TextDocument, touched: Map<number, Origin>) {
       origins: new Map(touched),
       lines: doc.lineCount,
       time: now,
-    });
+    };
+    pending.push(bucket);
     if (pending.length > MAX_PENDING) pending = pending.slice(-MAX_PENDING);
   }
-  const n = countOrigins(pending.find((b) => b.entity === rel)!);
+  // The bucket we just wrote, not a fresh lookup. Re-finding it by `entity`
+  // alone matched the first bucket with that relative path in ANY project, so
+  // two projects with a src/index.ts logged each other's counts. Keeping the
+  // reference also drops a non-null assertion that was load-bearing for no
+  // reason.
+  const n = countOrigins(bucket);
   log(`record ${rel} appeared=${n.ai} typed=${n.human}`);
+}
+
+// Drop any record of the lines an undo or redo moved. Only touches a bucket
+// that is already open for this file: if there is none, there is nothing to
+// correct.
+function forget(
+  doc: vscode.TextDocument,
+  changes: readonly vscode.TextDocumentContentChangeEvent[],
+) {
+  const project = projectFor(doc);
+  if (!project) return;
+  const rel = path.relative(project.root, doc.uri.fsPath).replace(/\\/g, "/");
+  const bucket = pending.find(
+    (b) => b.project === project.name && b.entity === rel,
+  );
+  if (!bucket) return;
+  for (const change of changes) {
+    for (const line of touchedLines(change.range.start.line, change.text)) {
+      bucket.origins.delete(line);
+    }
+  }
 }
 
 function build(b: Bucket): Heartbeat {
@@ -209,10 +236,19 @@ async function flush(force = false) {
 function onChange(e: vscode.TextDocumentChangeEvent) {
   if (!enabled()) return;
   if (e.document.uri.scheme !== "file") return;
-  // Undo and redo move text the author already accounted for. Scoring them
-  // would let a student inflate either bucket by mashing ctrl-Z.
-  if (e.reason === vscode.TextDocumentChangeReason.Undo) return;
-  if (e.reason === vscode.TextDocumentChangeReason.Redo) return;
+  // Undo and redo move text the author already accounted for, so neither is
+  // scored. But returning outright left the undone lines sitting in the open
+  // bucket with their original origin: an agent wrote a block, the student
+  // undid it, and the lines were still reported as agent-written because the
+  // bucket was never told. Forget them instead of ignoring the event, so the
+  // undone lines are attributed to whoever writes them next.
+  if (
+    e.reason === vscode.TextDocumentChangeReason.Undo ||
+    e.reason === vscode.TextDocumentChangeReason.Redo
+  ) {
+    forget(e.document, e.contentChanges);
+    return;
+  }
 
   const docLength = e.document.getText().length;
   const touched = new Map<number, Origin>();

@@ -49,7 +49,7 @@ def main(payload=None):
         return
 
     tool_input = payload.get("tool_input") or {}
-    rel = C.rel_in_repo(ctx, tool_input.get("file_path"))
+    rel = C.rel_in_repo(ctx, C.edited_path(tool_input))
     if rel is None:
         return
 

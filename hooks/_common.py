@@ -88,6 +88,22 @@ def skip_reason(payload):
     return None
 
 
+def edited_path(tool_input):
+    """The file a tool call targets, whatever that tool calls the field.
+
+    NotebookEdit was matched in hooks.json from the start and never recorded
+    anything, because its parameter is `notebook_path` and this only ever read
+    `file_path`. Every notebook edit resolved to None and returned quietly, so
+    the matcher advertised coverage that did not exist. Checked in order, most
+    common first.
+    """
+    for key in ("file_path", "notebook_path", "path", "filePath"):
+        value = tool_input.get(key)
+        if value:
+            return value
+    return None
+
+
 def rel_in_repo(ctx, file_path):
     """Repo-relative path, or None if outside the repo or excluded."""
     if not file_path:
@@ -190,7 +206,11 @@ def read_file_state(ctx, rel):
     if text is None:
         return None, None
     lines = repoutil.splitlines(text)
-    if counting.too_large(lines=lines):
+    # Both bounds, not just the line count. counting.MAX_BYTES existed and was
+    # never passed anything, so a file could be under 50k lines and still be
+    # megabytes of one-line-per-megabyte generated content, which is precisely
+    # the shape that makes SequenceMatcher expensive.
+    if counting.too_large(lines=lines, nbytes=len(text.encode("utf-8"))):
         return None, None
     return text, lines
 
@@ -199,11 +219,14 @@ def sync_drift(ctx, rel, current_text, current_lines):
     """Reconcile a file against its snapshot before attributing a new change.
 
     If the file on disk no longer matches what we last recorded, something
-    changed it outside a Claude tool call. Those lines belong to the student,
-    so they are tagged `human` and logged before the current edit is scored.
-    Doing this at edit time as well as session start keeps a student from
-    hand-editing a file mid-session and having it silently absorbed into the
-    AI bucket, or vice versa.
+    changed it outside a tool call. Those lines are attributed to the student
+    and logged before the current edit is scored, so a hand-edit made
+    mid-session cannot be silently absorbed into the AI bucket by the next
+    agent write, or vice versa.
+
+    Attributed, not observed. See the note in core/provenance.py for what that
+    inference rests on and where it is known to be wrong; the record carries
+    `via: "drift"` so the difference is not lost downstream.
 
     Returns (lines, tags) representing the reconciled pre-edit state.
     """
@@ -226,7 +249,7 @@ def sync_drift(ctx, rel, current_text, current_lines):
     if new_idx or removed:
         mask = counting.significant_mask(current_lines, rel)
         raw, sig = provenance.score(new_idx, mask)
-        emit(ctx, "drift", path=rel,
+        emit(ctx, "drift", path=rel, via="drift",
              lines_human=raw, sig_human=sig, lines_removed=removed,
              after_sha256=digest)
         heartbeat.record(ctx["rid"], ctx["name"], rel,

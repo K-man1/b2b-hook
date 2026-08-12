@@ -128,6 +128,59 @@ def forget(rid):
     return False
 
 
+def backlog(rid, ledger_file):
+    """How many records are undelivered, without parsing the whole ledger.
+
+    The edit path calls this on every tool call purely to decide whether a send
+    is due, and it used to get the number from `unsent`, which reads and JSON-
+    parses every record ever written for the repo. That is fine on day one and
+    a growing tax by week six. Sequence numbers are dense and assigned in
+    order, so the count is just the distance from the watermark to the head.
+
+    The impossible-watermark check runs here too, and has to: if this said zero
+    for a tampered watermark, `should_send` would answer no, `deliver` would
+    never run, and the check inside `unsent` would never get the chance to fire.
+    """
+    head = ledger.head_seq(ledger_file)
+    if state(rid)["sent_seq"] > head:
+        rewind(rid, -1)
+    return max(0, head - state(rid)["sent_seq"])
+
+
+def _clamp_to_ledger(rid, records):
+    """Lower a watermark that claims more delivered than has ever been written.
+
+    The watermark is a plain integer in a file the student owns, and it is the
+    single switch that decides whether anything is sent at all. Setting it past
+    the end of the ledger made `unsent` return nothing, forever: mark_sent only
+    ever advances, so nothing could bring it back down, and the repo went quiet
+    with no error and no failure count. Editing one number turned the only
+    channel with evidentiary weight off permanently.
+
+    A watermark above the ledger head is not a state normal operation can
+    reach -- seqs are assigned as records are written, so the server cannot
+    have acknowledged one that does not exist.
+
+    The response is to void the watermark entirely, not to lower it to the
+    head. Lowering it to the head would leave every existing record still
+    marked delivered, so the tampered install stays silent and merely stops
+    looking absurd. A watermark that is provably wrong carries no information
+    about what the server has, so the only safe reading is that nothing is
+    known to have arrived. That means one full resend for this repo, batched
+    and deduplicated server-side, which is the same cost `rewind` already
+    accepts and the same direction it errs in.
+    """
+    head = -1
+    for r in records:
+        try:
+            head = max(head, int(r.get("seq", -1)))
+        except (TypeError, ValueError):
+            continue
+    if state(rid)["sent_seq"] > head:
+        rewind(rid, -1)
+    return head
+
+
 def unsent(rid, ledger_file, limit=500):
     """Records above the watermark, oldest first.
 
@@ -141,9 +194,17 @@ def unsent(rid, ledger_file, limit=500):
     chunks rather than one request large enough to be rejected.
     """
     records, _bad = ledger.read_all(ledger_file)
+    _clamp_to_ledger(rid, records)
     after = state(rid)["sent_seq"]
-    pending = [r for r in records if int(r.get("seq", -1)) > after]
-    pending.sort(key=lambda r: int(r.get("seq", -1)))
+
+    def seq_of(r):
+        try:
+            return int(r.get("seq", -1))
+        except (TypeError, ValueError):
+            return -1
+
+    pending = [r for r in records if seq_of(r) > after]
+    pending.sort(key=seq_of)
     return pending[:limit], len(pending)
 
 

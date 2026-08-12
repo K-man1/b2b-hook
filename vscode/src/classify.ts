@@ -49,6 +49,30 @@ export function countNewlines(text: string): number {
   return n;
 }
 
+// Newlines that brought content with them.
+//
+// The "appeared" test counts newlines, and counting raw ones made the editor
+// itself trip it. Pressing Enter between a brace pair inserts "\n    \n" in a
+// single change event: two newlines, no code, and the line scored as
+// agent-written. Auto-indent, auto-closing brackets and trailing-newline
+// fixups all have this shape, so an honest student writing C or JavaScript
+// accumulated AI attribution by typing normally. That is the failure this tool
+// least gets to have.
+//
+// A generated block always carries text on its lines. Whitespace-only segments
+// are layout the editor produced around the cursor, so they do not count.
+export function countContentNewlines(text: string): number {
+  const segments = text.split("\n");
+  let n = 0;
+  // The first segment continues the line the cursor was already on, and the
+  // last is whatever trails the final newline, so neither is a line this change
+  // brought into being on its own.
+  for (let i = 1; i < segments.length; i++) {
+    if (segments[i].trim().length > 0) n++;
+  }
+  return n;
+}
+
 // Which line numbers a change lands on, in the document as it now stands.
 //
 // Scoring has to be per line, not per event. Typing arrives one character at a
@@ -74,10 +98,13 @@ export interface RawChange {
 
 export function classify(change: RawChange): Classified {
   const newlines = countNewlines(change.text);
-  const chars = change.text.length;
+  const chars = change.text.trim().length;
 
+  // Both tests run on content, not on raw text. `chars` is trimmed for the
+  // same reason the newline count is: a change made entirely of whitespace is
+  // the editor laying out around the cursor, and nobody authored it.
   const appeared =
-    chars >= APPEARED_CHARS || newlines >= APPEARED_NEWLINES;
+    chars >= APPEARED_CHARS || countContentNewlines(change.text) >= APPEARED_NEWLINES;
 
   return {
     origin: appeared ? "appeared" : "typed",

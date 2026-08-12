@@ -259,8 +259,19 @@ def walk_files(root):
 
 
 def read_text(path):
-    """Read a file as text, or None if missing/binary/unreadable."""
+    """Read a file as text, or None if missing/binary/symlinked/unreadable."""
+    # Symlinks are refused outright, and this is a privacy fix rather than a
+    # correctness one. `git ls-files` lists symlinks like any other entry, so a
+    # link committed in a repo -- `config.env -> ~/.aws/credentials`, or a link
+    # to a home directory checked in by accident -- had its *target* read and
+    # written verbatim into the snapshot store, in plaintext, in a directory
+    # that deliberately survives uninstall. Nothing outside the repo should
+    # ever end up there, and a symlink is not authored code in this repo
+    # anyway: whatever it points at is either counted at its real path or is
+    # none of our business.
     try:
+        if os.path.islink(path):
+            return None
         if os.path.getsize(path) > 2 * 1024 * 1024:
             return None
         with open(path, "rb") as fh:
@@ -282,10 +293,18 @@ def splitlines(text):
     file, which is almost all of them. Counting that as a line inflated every
     single attribution by exactly one line per file. Dropping one trailing
     empty element matches `wc -l` semantics.
+
+    Carriage returns are stripped, which matters more than it looks. Splitting
+    on "\\n" alone left a "\\r" on the end of every line of a CRLF file, so the
+    moment anything changed a file's line endings -- git's autocrlf, an editor
+    preference, a checkout on Windows -- every line differed from its snapshot
+    and the whole file was retagged to whoever touched it last. An entire
+    project's attribution could flip on a setting nobody thought of as an edit.
+    Line endings are not authorship.
     """
     if not text:
         return []
-    lines = text.split("\n")
+    lines = [ln[:-1] if ln.endswith("\r") else ln for ln in text.split("\n")]
     if lines and lines[-1] == "":
         lines.pop()
     return lines

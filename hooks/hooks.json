@@ -47,6 +47,16 @@
             "timeout": 30
           }
         ]
+      },
+      {
+        "matcher": "Bash|mcp__.*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/py.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/post_bash.py\"",
+            "timeout": 30
+          }
+        ]
       }
     ],
     "SessionEnd": [

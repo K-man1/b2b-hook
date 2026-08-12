@@ -37,6 +37,12 @@ def cmd_status(_args):
         "set, ending " + key[-4:] if len(key) >= 4 else "(not set)"))
     print("  reporting  : {}".format(
         "on" if config.sync_enabled() else "off (tracking locally only)"))
+    # An endpoint that is set but refused is the one "off" that is not a
+    # choice, so it gets a reason rather than being left to look like an
+    # ordinary local-only install.
+    problem = config.insecure_endpoint(cfg.get("endpoint"))
+    if problem:
+        print("               ! endpoint rejected: {}".format(problem))
 
     # Reported separately from `reporting` because the two are independent
     # channels: this one goes to the student's own Hackatime account using the
@@ -76,12 +82,34 @@ def cmd_status(_args):
     return 0
 
 
+def _resolve_key(raw):
+    """The API key to store, read off the terminal if asked.
+
+    `--key -` reads one line from stdin instead of taking the key on the
+    command line. Anything on argv is visible in `ps` to every other user on
+    the machine and lands in shell history, and the documented install line is
+    a `curl | sh` with the key inline, so this is the version to reach for on a
+    shared or multi-user box.
+    """
+    if raw != "-":
+        return raw
+    return sys.stdin.readline().strip()
+
+
 def cmd_configure(args):
     cfg = config.load()
     if args.key:
-        cfg["api_key"] = args.key
+        cfg["api_key"] = _resolve_key(args.key)
     if args.endpoint:
-        cfg["endpoint"] = args.endpoint.rstrip("/")
+        endpoint = args.endpoint.rstrip("/")
+        problem = config.insecure_endpoint(endpoint)
+        if problem:
+            # Refused, not warned. The endpoint is where the bearer token goes,
+            # and a warning printed into a `curl | sh` install scrolls past
+            # before anybody reads it.
+            print("Refusing to save this endpoint: {}".format(problem))
+            return 1
+        cfg["endpoint"] = endpoint
     if args.student_id:
         cfg["student_id"] = args.student_id
     if args.disable_sync:
@@ -190,7 +218,13 @@ def _merge_json_hooks(path, new_hooks):
             if entry not in current:
                 current.append(entry)
         merged_hooks[event] = current
-    existing.update({k: v for k, v in new_hooks.items() if k != "hooks"})
+    # setdefault, not update. Cursor's config carries a top-level `version`,
+    # and overwriting it meant installing hooks silently rewrote a field the
+    # student's file already owned. Ours is a default for a file that does not
+    # have one yet, never a correction to one that does.
+    for key, value in new_hooks.items():
+        if key != "hooks":
+            existing.setdefault(key, value)
     existing["hooks"] = merged_hooks
     return existing
 
@@ -311,6 +345,27 @@ def cmd_install_hooks(args):
         _scope_note(spec, scope)
         return 0
 
+    if slug in adapters.PLUGIN:
+        # A whole file we own, not a key inside a file the tool owns, so this
+        # writes rather than merges -- the same as the SCRIPT branch above and
+        # for the same reason: re-running after a plugin update has to replace
+        # the old copy, and the filename (aiattr.js) is ours alone, so there is
+        # nothing of the student's to preserve.
+        try:
+            source = adapters.render_plugin_asset(spec, PLUGIN_ROOT)
+        except (IOError, OSError, ValueError) as exc:
+            print("Could not read the {} plugin that ships with this "
+                  "install: {}".format(spec.get("label", slug), exc))
+            return 1
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as fh:
+            fh.write(source)
+        print("Wrote {}".format(path))
+        print("Restart {} -- plugins are loaded once, at startup.".format(
+            spec.get("label", slug)))
+        _scope_note(spec, scope)
+        return 0
+
     if slug in adapters.CLAUDE_SHAPED:
         new_hooks = adapters.build_claude_shaped(spec, PLUGIN_ROOT, slug)
     else:
@@ -419,7 +474,8 @@ def main():
     sub.add_parser("status", help="show configuration and tracking state")
 
     c = sub.add_parser("configure", help="bind this machine to a student account")
-    c.add_argument("--key")
+    c.add_argument("--key", help="API key, or '-' to read it from stdin so it "
+                                 "stays out of ps output and shell history")
     c.add_argument("--endpoint")
     c.add_argument("--student-id")
     c.add_argument("--disable-sync", action="store_true")

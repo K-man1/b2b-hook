@@ -84,6 +84,33 @@ def is_excluded(relpath):
     return any(fnmatch.fnmatch(p, g) for g in EXCLUDE_GLOBS)
 
 
+def _is_comment(stripped, prefixes):
+    """Does this line open or continue a comment?
+
+    `*` needs its own rule and getting it wrong was not cosmetic. It is listed
+    for C, C++, Java, JavaScript and friends to catch the continuation lines of
+    a block comment (` * see above`, ` */`), but a bare startswith("*") also
+    matches real code: `*ptr = compute();`, `*p++ = x;`, `*out = &buf[i];`.
+    Every pointer-dereference assignment in C was being scored as a comment and
+    dropped from the significant counts the usage band is computed from. It was
+    also a free way to hide agent-written C, by asking for a style that leads
+    lines with the operator.
+
+    A comment continuation is always `*` alone, `*` then whitespace, or `*/`.
+    Dereferences are `*` immediately followed by an identifier, a paren or
+    another star, so the two separate cleanly on the very next character.
+    """
+    for prefix in prefixes:
+        if not stripped.startswith(prefix):
+            continue
+        if prefix != "*":
+            return True
+        rest = stripped[1:]
+        if not rest or rest[0].isspace() or rest.startswith("/"):
+            return True
+    return False
+
+
 def significant_mask(lines, relpath):
     """Per-line booleans: is this line non-blank and not comment-only?
 
@@ -98,7 +125,7 @@ def significant_mask(lines, relpath):
         if not s:
             mask.append(False)
             continue
-        mask.append(not any(s.startswith(p) for p in prefixes))
+        mask.append(not _is_comment(s, prefixes))
     return mask
 
 

@@ -107,6 +107,15 @@ hooks live in `~/Documents/Cline/Rules/Hooks/` while its runtime reads
 so both get written. They are three-line scripts; picking one and being wrong
 would cost you every record silently.
 
+opencode is the other special case, and it also installs once for every
+project. It has no hook config file at all — its hooks are a JavaScript
+module — so `install-hooks opencode` copies one into
+`~/.config/opencode/plugins/aiattr.js` instead of writing a config entry. The
+file it copies is [assets/opencode/aiattr.js](assets/opencode/aiattr.js), and
+it is a shim: it hands each edit to the same `hooks/agent_hook.py` every other
+tool calls. **Restart opencode afterwards** — plugins are loaded once, at
+startup, so until you do, nothing is recorded.
+
 ---
 
 ## Your AI usage label
@@ -197,9 +206,27 @@ Worth knowing up front, so the numbers are not oversold.
 
 - **Pasted code counts as yours.** If you copy code from a browser into your
   editor, it changed the file while nothing was watching, so it lands in
-  `human`. The plugin cannot tell it apart from code you typed.
+  `human`. The plugin cannot tell it apart from code you typed. The same goes
+  for an agent this plugin has no hook installed for. Anything that changes a
+  file without a tool call is credited to you, because attributing it to you is
+  the best estimate available once the agent's own tool calls are accounted
+  for, not because anybody watched you write it.
 - **Work with Claude closed is invisible.** Nothing observes it, so nothing is
   recorded. It shows up as drift the next time a session starts.
+- **A reformat can move lines between buckets.** Attribution is matched on
+  lines with their whitespace removed, so reindenting, restyling braces or
+  changing line endings all keep a line's original author. What survives none
+  of that is a rewrite that moves real tokens: a formatter that splits one long
+  line into three produces lines nobody has written before, and no comparison
+  of two file versions can tell that apart from someone authoring them.
+- **Changes an agent makes through the terminal are attributed to the agent,
+  but less precisely.** A `Bash` or MCP tool call that writes files is detected
+  by comparing them against their snapshots afterwards, so the plugin knows the
+  agent's tool call caused the change without having watched it happen. Those
+  records are marked `via: tool_call` to say so. When a single tool call
+  changes a lot of files at once, that is a checkout, a pull or an install
+  rather than authorship, so it is recorded as a bulk change and credited to
+  nobody.
 - **Every folder counts, including ones you did not mean.** Same fallback
   wakatime-cli uses. Open a scratch directory and it becomes a project named
   after that directory. Opt out of anything you would rather it left alone.

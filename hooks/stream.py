@@ -36,6 +36,7 @@ Modes:
 import json
 import os
 import sys
+import time
 import urllib.error
 import urllib.request
 
@@ -43,7 +44,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import _common as C  # noqa: E402
 import sync  # noqa: E402
-from core import config, heartbeat, outbox  # noqa: E402
+from core import config, heartbeat, outbox, paths  # noqa: E402
 from core import report as report_mod  # noqa: E402
 
 TIMEOUT = 10
@@ -147,6 +148,41 @@ def deliver(ctx):
             return
 
 
+# How long a mid-session roll-up stays fresh. report.build re-walks and
+# re-reads every tracked file in the repo, and sync.report posts the entire
+# project index, so at the 20s streaming cadence an active session was doing a
+# full repo scan and a full index upload three times a minute. Neither number
+# moves fast enough to be worth that; the session boundaries force a refresh
+# regardless, so this only bounds how stale the website can get mid-session.
+REFRESH_INTERVAL = 300
+
+REFRESH_STAMP = "last_refresh.json"
+
+
+def _refresh_due(rid):
+    """True if this repo's roll-up is stale enough to be worth recomputing."""
+    path = os.path.join(paths.plugin_data_dir(), REFRESH_STAMP)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            stamps = json.load(fh)
+    except (OSError, ValueError):
+        stamps = {}
+    if not isinstance(stamps, dict):
+        stamps = {}
+    if time.time() - float(stamps.get(rid) or 0) < REFRESH_INTERVAL:
+        return False
+    stamps[rid] = time.time()
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(stamps, fh)
+        os.replace(tmp, path)
+    except OSError:
+        pass
+    return True
+
+
 def refresh(ctx):
     """Recompute this repo's roll-up and report it to the website.
 
@@ -201,8 +237,11 @@ def main():
         return  # purely local install; tracking continues, nothing is sent
 
     if mode == "edit":
-        _records, backlog = outbox.unsent(ctx["rid"], ctx["ledger"])
-        if not outbox.should_send(ctx["rid"], backlog,
+        # outbox.backlog, not outbox.unsent: this runs on every tool call and
+        # only needs the count, which comes off the ledger's tail rather than
+        # out of a full parse.
+        pending = outbox.backlog(ctx["rid"], ctx["ledger"])
+        if not outbox.should_send(ctx["rid"], pending,
                                   config.stream_interval(),
                                   config.stream_burst()):
             return
@@ -213,7 +252,7 @@ def main():
     # session.py / session_end.py, which compute the same roll-up, and with
     # sync.py, which posts it. Repeating it here would mean two full repo scans
     # at every session boundary for one set of numbers.
-    if mode == "edit":
+    if mode == "edit" and _refresh_due(ctx["rid"]):
         refresh(ctx)
 
 

@@ -27,18 +27,39 @@ def build(root, rid):
     files = []
     tracked = repoutil.tracked_files(root)
     counted = skipped = untracked_by_plugin = drifted_files = 0
+    excluded = unreadable = oversized = 0
+    excluded_bytes = 0
 
     for rel in tracked:
         if counting.is_excluded(rel):
+            # Counted, not just skipped. The exclusion list is matched against
+            # paths the student chooses, so `mkdir build` or naming a file
+            # `solver.generated.py` drops real code out of both sides of the
+            # ratio with nothing to show for it. The plugin cannot tell a
+            # genuine build directory from a hiding place -- that judgement
+            # needs to see the whole cohort -- but it can refuse to stay quiet
+            # about how much code went in there. Size comes from stat, so this
+            # stays free even when the excluded tree is enormous.
+            excluded += 1
             skipped += 1
+            try:
+                excluded_bytes += os.path.getsize(os.path.join(root, rel))
+            except OSError:
+                pass
             continue
         abspath = os.path.join(root, rel)
         text = repoutil.read_text(abspath)
         if text is None:
+            # Binary, symlinked, or unreadable. Reported rather than merely
+            # skipped: a single NUL byte is enough to make a source file
+            # invisible here, which is a one-keystroke way to remove a file
+            # from the accounting entirely.
+            unreadable += 1
             skipped += 1
             continue
         lines = repoutil.splitlines(text)
         if counting.too_large(lines=lines):
+            oversized += 1
             skipped += 1
             continue
 
@@ -51,8 +72,8 @@ def build(root, rid):
             tags = snap.get("tags", [])
         else:
             # Changed since the snapshot was written, i.e. edited outside a
-            # Claude session. Carry the surviving tags forward and attribute
-            # only the new lines, exactly as the drift sweep will at the next
+            # tool call. Carry the surviving tags forward and attribute only
+            # the new lines, exactly as the drift sweep will at the next
             # session start.
             #
             # Discarding every tag here instead, on the grounds that the file
@@ -87,6 +108,13 @@ def build(root, rid):
             "files_skipped": skipped,
             "files_never_observed": untracked_by_plugin,
             "files_drifted": drifted_files,
+            # The breakdown of what `files_skipped` is made of. Each of these
+            # is a way for code to leave the ratio without leaving a trace, so
+            # each one travels with the numbers it is missing from.
+            "files_excluded": excluded,
+            "bytes_excluded": excluded_bytes,
+            "files_unreadable": unreadable,
+            "files_oversized": oversized,
         },
     }
 
@@ -124,6 +152,13 @@ def band(totals, basis="sig"):
     project. Including `unobserved` in the denominator answers a different
     question: it would report a repo that was 90% written before tracking began
     as barely-any-AI, when the truth is that nobody knows what that 90% was.
+
+    Both sides of that fraction have to be populated for it to mean anything,
+    which is what ties this formula to the decision in core/provenance.py to
+    keep attributing drift to the student. A hook cannot watch a person type,
+    so if `human` held only directly observed authorship it would be empty, the
+    denominator would collapse to `ai`, and every student who ran an agent once
+    would be reported at 100%. The estimate is load-bearing, not a leftover.
 
     Returns level, label, the percentage, and the coverage that percentage rests
     on, so a reviewer can see at a glance whether to believe it.

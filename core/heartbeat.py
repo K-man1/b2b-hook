@@ -79,6 +79,18 @@ TIMEOUT = 8
 
 DEFAULT_API_URL = "https://hackatime.hackclub.com/api/hackatime/v1"
 
+# Hosts the student's Hackatime key may be sent to. Both Hackatime deployments
+# plus WakaTime itself, since a wakatime.cfg written by WakaTime's own plugins
+# legitimately points there. Subdomains of each are accepted; anything else is
+# not, whatever the config file says. See _usable_url.
+ALLOWED_HOSTS = (
+    "hackatime.hackclub.com",
+    "waka.hackclub.com",
+    "hackclub.com",
+    "wakatime.com",
+    "wakapi.dev",
+)
+
 # Their parser reads a bare product name fine; several of their own regression
 # tests use `claude` with no version. `editor` is also sent explicitly below,
 # so recognition does not depend on this string being parsed correctly.
@@ -161,12 +173,38 @@ def api_key():
             or "").strip()
 
 
+def _usable_url(url):
+    """True if this is somewhere a bearer token may be sent.
+
+    ~/.wakatime.cfg is a shared file that any editor plugin, setup script or
+    installer can write, and `api_url` is read straight out of it and used as
+    the POST target for a request carrying `Authorization: Bearer <the
+    student's Hackatime key>`. One ini line in that file was therefore enough
+    to make this plugin hand the student's credential to an arbitrary host.
+    Requiring https keeps it off the wire in cleartext; requiring a known host
+    keeps it from going to the wrong party at all.
+
+    Localhost stays allowed so the path can be tested without a live account.
+    """
+    if not url.startswith("https://"):
+        host = url.split("://", 1)[-1].split("/")[0].split(":")[0].lower()
+        return host in ("localhost", "127.0.0.1", "::1", "[::1]")
+    host = url[len("https://"):].split("/")[0].split(":")[0].lower()
+    return host in ALLOWED_HOSTS or any(
+        host.endswith("." + h) for h in ALLOWED_HOSTS)
+
+
 def api_url():
     """Base URL for the heartbeat API, normalised to end at /api/hackatime/v1.
 
     wakatime.cfg's api_url is written by whichever setup script ran last, and
     turns up both with and without the version suffix. Appending blindly gives
     a 404 half the time, so normalise instead of trusting it.
+
+    An unrecognised host falls back to the default rather than being honoured.
+    Falling back costs a heartbeat going to the wrong Hackatime instance for
+    someone self-hosting, which they can fix with the explicit `hackatime.
+    api_url` config key; honouring it costs a leaked credential.
     """
     cfg = config.load().get("hackatime") or {}
     url = (cfg.get("api_url")
@@ -176,7 +214,7 @@ def api_url():
         url = url[: -len("/heartbeats")]
     if url.endswith("/users/current"):
         url = url[: -len("/users/current")]
-    return url
+    return url if _usable_url(url) else DEFAULT_API_URL
 
 
 def enabled():
@@ -410,7 +448,14 @@ def flush(force=False):
         # subject to it.
         with ledger.FileLock(state_path() + ".lock"):
             data = _load()
-            data["pending"] = (batch + data["pending"])[-MAX_PENDING:]
+            # Trim from the END, not the start. `[-MAX_PENDING:]` keeps the
+            # newest MAX_PENDING entries, and since the failed batch is
+            # prepended it was the first thing dropped: a full batch of 100
+            # heartbeats put back into a queue already holding 500 lost all 100
+            # of them, which is exactly the work this branch exists to save.
+            # The batch is known-undelivered and older than everything else
+            # queued, so it goes to the front and the tail is what gives.
+            data["pending"] = (batch + data["pending"])[:MAX_PENDING]
             _write(data)
         return 0
     return len(batch)
