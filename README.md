@@ -63,6 +63,19 @@ You are looking for `reporting: on`, and `hackatime: on` if you did step 5.
 
 That is the whole setup. Work normally from here.
 
+### Staying up to date
+
+Step 4 also switches on Claude Code's auto-update for this marketplace, so you
+get new versions without doing anything. That is not the default: Claude Code
+auto-updates its own marketplaces, but third-party ones like this one ship with
+it off, and a student who never turns it on keeps running whatever version they
+first installed. Tracking that is months out of date does not announce itself —
+it just quietly reports the wrong number — so `configure` sets the flag rather
+than trusting anybody to remember.
+
+If you skipped `configure`, or want to check, `/plugin` → **Marketplaces** →
+this marketplace shows the auto-update toggle.
+
 ---
 
 ## Not using Claude Code?
@@ -232,6 +245,27 @@ Worth knowing up front, so the numbers are not oversold.
   after that directory. Opt out of anything you would rather it left alone.
 - **It only knows about agents it is installed for.** This one tracks Claude
   Code. Declare whichever agent you actually use when you enrol.
+
+---
+
+## Releasing a new version
+
+**Bump `version` in `.claude-plugin/plugin.json` in the same commit as the
+change.** Claude Code caches the plugin in a directory keyed by that string and
+only offers an update when it moves. Push ten commits without touching it and
+every student, including you, keeps running the old code — the marketplace
+refreshes, sees the version it already has, and installs nothing. Nothing warns
+you. The hooks keep firing, they are just the previous version's hooks.
+
+That is not hypothetical. It shipped: `post_bash.py` sat unreleased across ten
+commits, so writes made through Bash went unattributed the whole time, and the
+number those sessions produced was wrong with no sign that anything had failed.
+
+To check what students are actually running, rather than what you pushed:
+
+```bash
+cat ~/.claude/plugins/cache/ai-attribution-marketplace/ai-attribution/*/.claude-plugin/plugin.json
+```
 
 ---
 

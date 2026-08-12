@@ -4,4 +4,4 @@
 # upward into hooks/ to find it. Every other module in core/ is importable on
 # its own; the version string should not be the one thing that drags the hook
 # layer in behind it.
-VERSION = "0.6.0"
+VERSION = "0.7.0"

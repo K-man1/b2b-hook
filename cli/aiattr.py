@@ -22,7 +22,12 @@ from core import adapters, agents, config, registry  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
+
+# The marketplace this plugin ships from, as named in the student's
+# ~/.claude/settings.json. Needed by name because that is the key the
+# extraKnownMarketplaces map is stored under.
+MARKETPLACE_NAME = "ai-attribution-marketplace"
 
 
 def cmd_status(_args):
@@ -96,6 +101,72 @@ def _resolve_key(raw):
     return sys.stdin.readline().strip()
 
 
+def claude_settings_path():
+    return os.path.expanduser("~/.claude/settings.json")
+
+
+def enable_marketplace_autoupdate():
+    """Turn on Claude Code's auto-update for this plugin's marketplace.
+
+    Claude Code enables auto-update by default only for Anthropic's own
+    marketplaces. Third-party ones, which is what this is, ship with it OFF, so
+    a student who follows the README installs once and then never receives
+    another version. For a tool whose whole job is producing a trustworthy
+    number, silently running months-old tracking code is the worst outcome
+    available: it fails without ever saying so.
+
+    Bumping `version` in plugin.json is the other half. Claude Code only offers
+    an update when that field moves, so both switches have to be set or nothing
+    reaches anybody.
+
+    Written here rather than in install.sh because install.sh is the path for
+    students who do not have Claude Code at all -- it unpacks a tarball and
+    never touches the marketplace. `configure` is the one command both paths
+    run, so it is the only place this can live and reach everyone.
+
+    Returns a short human-readable status, never raises: a student whose
+    settings file is unreadable should still get a configured plugin.
+    """
+    path = claude_settings_path()
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            settings = json.load(fh)
+    except FileNotFoundError:
+        return "Claude Code settings not found; skipped auto-update setup."
+    except (OSError, ValueError):
+        return "Could not read {}; set auto-update from /plugin.".format(path)
+
+    if not isinstance(settings, dict):
+        return "Unexpected settings format; set auto-update from /plugin."
+
+    markets = settings.get("extraKnownMarketplaces")
+    if not isinstance(markets, dict) or MARKETPLACE_NAME not in markets:
+        # Not a Claude Code plugin install, or the marketplace was added under
+        # another name. Deliberately not created from nothing: inventing an
+        # entry Claude Code did not write risks pointing it at the wrong source.
+        return "Marketplace not registered here; skipped auto-update setup."
+
+    entry = markets[MARKETPLACE_NAME]
+    if not isinstance(entry, dict):
+        return "Unexpected marketplace entry; set auto-update from /plugin."
+    if entry.get("autoUpdate") is True:
+        return "Marketplace auto-update already on."
+
+    entry["autoUpdate"] = True
+    try:
+        # Rewritten in place with the original key order preserved. This is the
+        # student's own settings file, holding permissions and much else, so it
+        # is merged into rather than regenerated.
+        tmp = path + ".aiattr.tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(settings, fh, indent=2)
+            fh.write("\n")
+        os.replace(tmp, path)
+    except OSError:
+        return "Could not write {}; set auto-update from /plugin.".format(path)
+    return "Marketplace auto-update enabled."
+
+
 def cmd_configure(args):
     cfg = config.load()
     if args.key:
@@ -122,6 +193,7 @@ def cmd_configure(args):
         cfg["hackatime"] = ht
     path = config.save(cfg)
     print("Wrote {}".format(path))
+    print(enable_marketplace_autoupdate())
     return cmd_status(args)
 
 
