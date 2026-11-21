@@ -33,14 +33,22 @@ the student cannot read the rule they are being measured against.
 
 PROMPT TEXT NEVER ENTERS THE LEDGER
 
-The ledger streams to a server, so it carries the prompt's length and hash,
-never its text. The text is kept locally in prompts.jsonl (0600) next to the
-turn state, because it is the evidence a reviewer will eventually need for a
-submitted hour. Sealing it for that upload is a separate step; until then it
-does not leave the machine, and it is purged after RETENTION_DAYS.
+The ledger streams to a server, so it carries the prompt's length and a
+salted hash, never its text. The text is kept locally in prompts.jsonl (0600)
+next to the turn state, because it is the evidence a reviewer will eventually
+need for a submitted hour. Sealing it for that upload is a separate step;
+until then it does not leave the machine, and it is purged after
+RETENTION_DAYS.
+
+The hash is salted per prompt because a plain one leaks exactly the prompts
+that matter most. "continue", "fix it" and "keep going" are a handful of
+strings; anyone holding the ledger could hash them and read those turns back.
+The salt is stored only beside the text, so the hash can be checked against
+the text once it is unsealed, and not before.
 """
 
 import hashlib
+import hmac
 import json
 import os
 import time
@@ -53,20 +61,32 @@ STATE_VERSION = 1
 # enough to cover a program's submission window, then deleted.
 RETENTION_DAYS = 45
 
-# Files reconciled for hand edits at each prompt. The set is the files the
-# agent touched this session, which is what a student reviewing its work is
-# most likely to be fixing. Bounded so a session that rewrote the whole repo
-# does not turn every prompt into a full scan.
+# Files reconciled for hand edits at each prompt. Bounded so a student who
+# regenerated half the repo between turns does not stall their next prompt;
+# anything past the cap is still picked up by the next turn or session sweep.
 MAX_RECONCILE_FILES = 200
 
 # Ledger kinds that are an agent acting on the repo during a turn.
 _EDIT_KINDS = ("edit", "bulk_change")
 
 
-def _session_key(session_id):
+def key(ctx):
+    """The id turn state is kept under for this hook invocation's session.
+
+    Some agents send no session id. All of those used to share one
+    "nosession" slot per repo, so Cursor's turns and Codex's turns in the
+    same repo were numbered as one conversation and closed each other as
+    interrupted. Falling back to the agent keeps different tools apart. Two
+    sessions of the same id-less agent still share a slot, which nothing on
+    this side can fix, so their records carry `no_session` for the server.
+    """
+    return ctx.get("session_id") or "nosession:" + (ctx.get("agent") or "")
+
+
+def _session_key(session_key):
     # Hashed: session ids come from the agent, and some agents use values that
     # are not safe as filenames.
-    raw = session_id or "nosession"
+    raw = session_key or "nosession"
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:24]
 
 
@@ -83,8 +103,7 @@ def prompts_path(rid, session_id):
 
 
 def _fresh():
-    return {"v": STATE_VERSION, "turn": 0, "open": None,
-            "last_stop": None, "files": []}
+    return {"v": STATE_VERSION, "turn": 0, "open": None, "last_stop": None}
 
 
 def load(rid, session_id):
@@ -156,34 +175,47 @@ def records_since(ledger_file, offset):
     return out
 
 
-def prompt_features(text):
-    """Size and fingerprint of a prompt. Mechanical only.
+def salted_hash(salt, text):
+    """HMAC-SHA256 of the prompt, keyed by its own random salt."""
+    return hmac.new(bytes.fromhex(salt), (text or "").encode("utf-8"),
+                    hashlib.sha256).hexdigest()
 
-    Whether a prompt is specific, or a bare "fix it", is a judgement, and
-    judgements are made on the server from the sealed text. What is computed
-    here is what a reviewer would want to line up against that text: how big
-    it was, and a hash proving which text it was.
+
+def prompt_features(text):
+    """Size and fingerprint of a prompt, and the salt behind the fingerprint.
+
+    Mechanical only. Whether a prompt is specific, or a bare "fix it", is a
+    judgement, and judgements are made on the server from the sealed text.
+    What is computed here is what a reviewer would want to line up against
+    that text: how big it was, and a hash proving which text it was.
+
+    Returns (fields, salt). The salt goes into local storage with the text and
+    never into the ledger; see the module docstring.
     """
     text = text or ""
+    salt = os.urandom(16).hex()
     return {
         "prompt_chars": len(text),
         "prompt_lines": text.count("\n") + 1 if text else 0,
-        "prompt_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest(),
+        "prompt_hmac": salted_hash(salt, text),
         "prompt_code_fences": text.count("```") // 2,
         "prompt_is_command": text.lstrip().startswith("/"),
-    }
+    }, salt
 
 
-def summarize_turn(records, session_id):
+def summarize_turn(records, ctx):
     """What the agent did during one turn, from the ledger slice it produced.
 
     Filtered by session as well as by position, because two sessions in the
-    same repo share one ledger and their records interleave.
+    same repo share one ledger and their records interleave. With no session
+    id the agent is the only thing left to tell them apart.
     """
     edits = ai_lines = ai_sig = removed = 0
     files = set()
     for rec in records:
-        if rec.get("session_id") != session_id:
+        if rec.get("session_id") != ctx["session_id"]:
+            continue
+        if not ctx["session_id"] and rec.get("agent") != ctx["agent"]:
             continue
         kind = rec.get("kind")
         if kind == "edit":
@@ -229,19 +261,19 @@ def unfinished_edits(rid, since):
     return count
 
 
-def store_prompt(rid, session_id, turn, ts, text):
-    """Keep the raw prompt locally. Never sent by anything in this version."""
+def store_prompt(rid, session_id, turn, ts, text, salt):
+    """Keep the raw prompt, and the salt for its hash, locally.
+
+    Never sent by anything in this version. The salt sits here and nowhere
+    else, which is what keeps the ledger's prompt_hmac unreadable until this
+    file is sealed and submitted.
+    """
     path = prompts_path(rid, session_id)
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"turn": turn, "ts": ts, "text": text},
-                            ensure_ascii=False) + "\n")
-
-
-def remember_files(state, files):
-    merged = list(dict.fromkeys(list(state.get("files") or []) + list(files)))
-    state["files"] = merged[-MAX_RECONCILE_FILES:]
+        fh.write(json.dumps({"turn": turn, "ts": ts, "salt": salt,
+                             "text": text}, ensure_ascii=False) + "\n")
 
 
 def prune(max_age_days=RETENTION_DAYS):

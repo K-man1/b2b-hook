@@ -215,7 +215,7 @@ def read_file_state(ctx, rel):
     return text, lines
 
 
-def sync_drift(ctx, rel, current_text, current_lines, stats=None):
+def sync_drift(ctx, rel, current_text, current_lines):
     """Reconcile a file against its snapshot before attributing a new change.
 
     If the file on disk no longer matches what we last recorded, something
@@ -228,9 +228,7 @@ def sync_drift(ctx, rel, current_text, current_lines, stats=None):
     inference rests on and where it is known to be wrong; the record carries
     `via: "drift"` so the difference is not lost downstream.
 
-    Returns (lines, tags) representing the reconciled pre-edit state. When
-    `stats` is a dict, the human lines found are added to it, so the prompt
-    hook can say how much the student changed by hand between two turns.
+    Returns (lines, tags) representing the reconciled pre-edit state.
     """
     snap_file = paths.snapshot_path(ctx["rid"], rel)
     snap = provenance.load_snapshot(snap_file)
@@ -254,11 +252,6 @@ def sync_drift(ctx, rel, current_text, current_lines, stats=None):
         emit(ctx, "drift", path=rel, via="drift",
              lines_human=raw, sig_human=sig, lines_removed=removed,
              after_sha256=digest)
-        if stats is not None:
-            stats["lines_human"] = stats.get("lines_human", 0) + raw
-            stats["sig_human"] = stats.get("sig_human", 0) + sig
-            stats["lines_removed"] = stats.get("lines_removed", 0) + removed
-            stats["files"] = stats.get("files", 0) + 1
         heartbeat.record(ctx["rid"], ctx["name"], rel,
                          human_lines=raw, session_id=ctx["session_id"],
                          branch=ctx["branch"], agent=ctx["agent"])

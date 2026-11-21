@@ -34,7 +34,7 @@ def close_turn(ctx, state, now, ended):
     if not open_turn:
         return None
     records = C.turns.records_since(ctx["ledger"], open_turn.get("offset", 0))
-    did = C.turns.summarize_turn(records, ctx["session_id"])
+    did = C.turns.summarize_turn(records, ctx)
     started = float(open_turn.get("started") or now)
     rec = C.emit(ctx, "turn_end",
                  turn=open_turn.get("turn"),
@@ -45,8 +45,8 @@ def close_turn(ctx, state, now, ended):
                  sig_ai=did["sig_ai"],
                  lines_removed=did["lines_removed"],
                  files_touched=len(did["files"]),
-                 edits_unfinished=C.turns.unfinished_edits(ctx["rid"], started))
-    C.turns.remember_files(state, did["files"])
+                 edits_unfinished=C.turns.unfinished_edits(ctx["rid"], started),
+                 no_session=not ctx["session_id"])
     state["open"] = None
     state["last_stop"] = now
     return rec
@@ -59,15 +59,16 @@ def main(payload=None):
     if ctx is None:
         return
     now = time.time()
-    with C.turns.lock(ctx["rid"], ctx["session_id"]):
-        state = C.turns.load(ctx["rid"], ctx["session_id"])
+    key = C.turns.key(ctx)
+    with C.turns.lock(ctx["rid"], key):
+        state = C.turns.load(ctx["rid"], key)
         rec = close_turn(ctx, state, now, "stop")
         if rec is None:
             # A Stop with no prompt seen: the plugin was enabled mid-turn, or
             # the session was resumed. Still a moment the agent handed control
             # back, so the review gap for the next prompt starts here.
             state["last_stop"] = now
-        C.turns.save(ctx["rid"], ctx["session_id"], state)
+        C.turns.save(ctx["rid"], key, state)
     if rec is not None:
         C.spawn_stream(ctx)
 

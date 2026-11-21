@@ -935,6 +935,218 @@ def test_turn_hooks_are_wired():
               str(cmds))
 
 
+class _TurnRepo:
+    """A throwaway repo plus the real hook scripts, driven the way Claude Code
+    drives them. Shared by the turn tests so each reads as a story."""
+
+    def __init__(self, d):
+        import importlib
+        import subprocess
+        from core import paths
+        os.environ["AIATTR_DATA_DIR"] = os.path.join(d, "data")
+        importlib.reload(paths)
+        self.paths = paths
+        self.hooks = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                  "..", "hooks")
+        self.repo = os.path.join(d, "repo")
+        os.makedirs(self.repo)
+        subprocess.run(["git", "init", "-q"], cwd=self.repo, capture_output=True)
+
+    def write(self, rel, text):
+        import time as _t
+        path = os.path.join(self.repo, rel)
+        with open(path, "w") as fh:
+            fh.write(text)
+        # Snapshots are compared by mtime. Push the edit clearly past the
+        # snapshot so coarse filesystem clocks cannot hide it.
+        future = _t.time() + 5
+        os.utime(path, (future, future))
+
+    def run(self, script, payload, sid="s1"):
+        import subprocess
+        import sys as _sys
+        body = dict({"cwd": self.repo}, **payload)
+        if sid is not None:
+            body.setdefault("session_id", sid)
+        return subprocess.run([_sys.executable, os.path.join(self.hooks, script)],
+                              input=json.dumps(body), capture_output=True,
+                              text=True).returncode
+
+    def agent_write(self, rel, text, tool_id, sid="s1"):
+        import time as _t
+        edit = {"tool_use_id": tool_id, "tool_name": "Write",
+                "tool_input": {"file_path": os.path.join(self.repo, rel)}}
+        self.run("pre_edit.py", edit, sid)
+        path = os.path.join(self.repo, rel)
+        with open(path, "w") as fh:
+            fh.write(text)
+        past = _t.time() - 5
+        os.utime(path, (past, past))
+        self.run("post_edit.py", edit, sid)
+
+    def records(self, kind):
+        from core import ledger as ledger_mod
+        recs, _ = ledger_mod.read_all(
+            self.paths.ledger_path(self.paths.repo_id(self.repo)))
+        return [r for r in recs if r.get("kind") == kind]
+
+    def close(self):
+        import importlib
+        del os.environ["AIATTR_DATA_DIR"]
+        importlib.reload(self.paths)
+
+
+def test_prompt_hash_is_salted():
+    """A plain hash of "continue" is the same for everyone, so the ledger
+    would give away every low-effort prompt. Salted, it gives away none."""
+    import tempfile
+    from core import turns
+    with tempfile.TemporaryDirectory() as d:
+        t = _TurnRepo(d)
+        try:
+            t.write("a.py", "x = 1\n")
+            t.run("session.py", {})
+            t.run("prompt.py", {"prompt": "continue"})
+            t.run("stop.py", {})
+            t.run("prompt.py", {"prompt": "continue"})
+            a, b = t.records("prompt")
+            check("the same prompt twice gives two different hashes",
+                  a["prompt_hmac"] != b["prompt_hmac"])
+            check("no unsalted prompt hash is recorded",
+                  "prompt_sha256" not in a)
+            import hashlib
+            plain = hashlib.sha256(b"continue").hexdigest()
+            raw = open(t.paths.ledger_path(t.paths.repo_id(t.repo))).read()
+            check("the plain hash of a common prompt is not in the ledger",
+                  plain not in raw)
+            stored = [json.loads(l) for l in open(turns.prompts_path(
+                t.paths.repo_id(t.repo), "s1")).read().splitlines()]
+            check("the stored salt reproduces the ledger's hash",
+                  turns.salted_hash(stored[0]["salt"], stored[0]["text"])
+                  == a["prompt_hmac"])
+        finally:
+            t.close()
+
+
+def test_hand_edits_count_writing_not_reshuffling():
+    """Moving, duplicating, blanking or commenting lines is not writing code.
+
+    Each of these is a free way to make a turn look like the student worked
+    on the agent's output. Whitespace was already absorbed by normalize();
+    these are the next-cheapest pads.
+    """
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        t = _TurnRepo(d)
+        try:
+            t.write("a.py", "x = 1\n")
+            t.run("session.py", {})
+            t.run("prompt.py", {"prompt": "write two functions"})
+            t.agent_write("a.py", "def f():\n    return 1\n"
+                                  "def g():\n    return 2\n", "w1")
+            t.run("stop.py", {})
+
+            # Swap the functions, duplicate a line, add blanks and a comment.
+            t.write("a.py", "def g():\n    return 2\n\n\n"
+                            "# tidy\n"
+                            "def f():\n    return 1\n    return 1\n")
+            t.run("prompt.py", {"prompt": "ok"})
+            p = t.records("prompt")[-1]
+            check("moved, duplicated and blank lines are not counted as written",
+                  p["lines_human"] == 1 and p["lines_human_moved"] >= 2, str(p))
+            check("a comment-only line is not significant writing",
+                  p["sig_human"] == 0, str(p))
+            t.run("stop.py", {})
+
+            # Whitespace only: nothing at all.
+            t.write("a.py", "def g():\n  return 2\n\n\n# tidy\n"
+                            "def f():\n  return 1\n  return 1\n")
+            t.run("prompt.py", {"prompt": "ok"})
+            p = t.records("prompt")[-1]
+            check("reindenting counts as nothing",
+                  p["lines_human"] == 0 and p["files_hand_edited"] == 0, str(p))
+            t.run("stop.py", {})
+
+            # Real code: a new line the file never had.
+            t.write("a.py", "def g():\n  return 2\n\n\n# tidy\n"
+                            "def f():\n  return 1\n  return 1\n"
+                            "def h(n):\n  return n * 2\n")
+            t.run("prompt.py", {"prompt": "ok"})
+            p = t.records("prompt")[-1]
+            check("genuinely new code is counted, and is significant",
+                  p["lines_human"] == 2 and p["sig_human"] == 2, str(p))
+        finally:
+            t.close()
+
+
+def test_hand_edits_are_found_anywhere_in_the_project():
+    """A file the agent never touched, and a file that did not exist at the
+    last turn, are both the student's work. The first version only looked at
+    files the agent had touched, so writing a new module by hand read as
+    doing nothing between turns."""
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        t = _TurnRepo(d)
+        try:
+            t.write("a.py", "x = 1\n")
+            t.write("untouched.py", "y = 1\n")
+            t.run("session.py", {})
+            t.run("prompt.py", {"prompt": "edit a"})
+            t.agent_write("a.py", "x = 2\n", "w1")
+            t.run("stop.py", {})
+
+            t.write("untouched.py", "y = 1\nz = y + 1\n")
+            t.write("new_by_hand.py", "def helper():\n    return 42\n")
+            t.run("prompt.py", {"prompt": "next"})
+            p = t.records("prompt")[-1]
+            check("a hand edit in a file the agent never touched is counted",
+                  p["files_hand_edited"] == 1, str(p))
+            check("a file written by hand between turns is counted",
+                  p["files_hand_created"] == 1 and p["lines_human"] == 3, str(p))
+
+            t.run("stop.py", {})
+            t.run("prompt.py", {"prompt": "again"})
+            p = t.records("prompt")[-1]
+            check("and is not counted again at the following prompt",
+                  p["lines_human"] == 0 and p["files_hand_created"] == 0, str(p))
+        finally:
+            t.close()
+
+
+def test_agents_without_session_ids_are_kept_apart():
+    """With no session id, two agents in one repo used to share one turn
+    counter and close each other's turns as interrupted."""
+    import subprocess
+    import sys as _sys
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        t = _TurnRepo(d)
+        try:
+            t.write("a.py", "x = 1\n")
+            t.run("session.py", {})
+            hook = os.path.join(t.hooks, "agent_hook.py")
+
+            def prompt(agent):
+                subprocess.run([_sys.executable, hook, "prompt", "--agent", agent,
+                                "--cwd", t.repo], input=json.dumps({"prompt": "go"}),
+                               capture_output=True, text=True)
+
+            prompt("cursor")
+            prompt("codex")
+            prompt("cursor")
+            prompts = t.records("prompt")
+            check("each id-less agent numbers its own turns",
+                  [(p["agent"], p["turn"]) for p in prompts]
+                  == [("cursor", 1), ("codex", 1), ("cursor", 2)], str(prompts))
+            ends = t.records("turn_end")
+            check("one agent's prompt does not interrupt another's turn",
+                  [e["agent"] for e in ends] == ["cursor"], str(ends))
+            check("records without a session id say so",
+                  all(p.get("no_session") for p in prompts))
+        finally:
+            t.close()
+
+
 def main():
     import json as _json
     globals()["json"] = _json
@@ -953,6 +1165,8 @@ def main():
     print("hook install scope");    test_hooks_install_machine_wide_by_default()
     print("opencode plugin");       test_opencode_plugin_records_the_same_way_a_config_hook_would()
     print("turns");                 test_turns_record_how_the_human_steered(); test_turn_hooks_are_wired()
+    print("turn loopholes");        test_prompt_hash_is_salted(); test_hand_edits_count_writing_not_reshuffling()
+    print("                ");      test_hand_edits_are_found_anywhere_in_the_project(); test_agents_without_session_ids_are_kept_apart()
     print()
     print("{} passed, {} failed".format(len(PASS), len(FAIL)))
     return 1 if FAIL else 0

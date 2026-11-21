@@ -554,7 +554,10 @@ def turn_rows(records, limit=None):
     """
     rows, by_key = [], {}
     for rec in records:
-        key = (rec.get("session_id"), rec.get("turn"))
+        # The same fallback turn state uses (core/turns.key): without a
+        # session id, the agent is what keeps two tools' turns apart.
+        session = rec.get("session_id") or "nosession:" + (rec.get("agent") or "")
+        key = (session, rec.get("turn"))
         if rec.get("kind") == "prompt":
             row = {"prompt": rec, "end": None}
             by_key[key] = row

@@ -56,10 +56,11 @@ def main(payload=None):
 
     # A turn still open here was never handed back: the student closed the
     # session mid-run. Closed first, so its record lands before session_end.
-    with C.turns.lock(ctx["rid"], ctx["session_id"]):
-        state = C.turns.load(ctx["rid"], ctx["session_id"])
+    key = C.turns.key(ctx)
+    with C.turns.lock(ctx["rid"], key):
+        state = C.turns.load(ctx["rid"], key)
         if stop.close_turn(ctx, state, time.time(), "session_end"):
-            C.turns.save(ctx["rid"], ctx["session_id"], state)
+            C.turns.save(ctx["rid"], key, state)
 
     data = report_mod.build(ctx["root"], ctx["rid"])
     head, seq = ledger_head(ctx)

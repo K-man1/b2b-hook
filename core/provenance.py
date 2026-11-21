@@ -162,6 +162,33 @@ def retag(before_lines, before_tags, after_lines, actor):
     return after_tags, new_indices, removed
 
 
+def authored(before_lines, after_lines, new_indices):
+    """The new lines whose text did not exist before this change.
+
+    `retag` decides attribution, and a line moved to a new position is new to
+    it: difflib reports a move as a delete plus an insert. That is fine for
+    who-owns-which-line, but as a measure of how much someone *wrote* it is
+    padding for free. Swapping two functions, pasting a line ten times, or
+    adding blank lines all show up as "new lines" without a single new token.
+
+    So this keeps only indices whose normalized text is non-empty, absent from
+    the before-image, and not already counted earlier in the same change. Used
+    for the per-turn hand-edit count, where the question is "how much did the
+    student write between turns", not "who owns this line now".
+    """
+    seen = {normalize(l) for l in before_lines}
+    out = []
+    for j in new_indices:
+        if j >= len(after_lines):
+            continue
+        text = normalize(after_lines[j])
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        out.append(j)
+    return out
+
+
 def score(new_indices, sig_mask):
     """Split a set of newly attributed lines into raw and significant counts."""
     raw = len(new_indices)
