@@ -31,14 +31,18 @@ Judging is not done here either. These records are facts, not a verdict on
 whether a turn was real iteration. The verdict belongs on the server, where
 the student cannot read the rule they are being measured against.
 
-PROMPT TEXT NEVER ENTERS THE LEDGER
+PROMPT TEXT NEVER ENTERS THE LEDGER, AND IS NEVER STORED IN THE CLEAR
 
 The ledger streams to a server, so it carries the prompt's length and a
-salted hash, never its text. The text is kept locally in prompts.jsonl (0600)
-next to the turn state, because it is the evidence a reviewer will eventually
-need for a submitted hour. Sealing it for that upload is a separate step;
-until then it does not leave the machine, and it is purged after
-RETENTION_DAYS.
+salted hash, never its text. The text is the evidence a reviewer will need for
+a submitted hour, so it is kept -- but only sealed to the program's public key
+(core/seal.py), in prompts.sealed.jsonl. The plaintext never touches the disk,
+which matters most on Windows, where file permissions do little to keep other
+programs out. With no key configured the text is not kept at all. Sealed
+boxes stay on the machine until hours are submitted, and are purged after
+RETENTION_DAYS like everything else here.
+
+Before any of that, credentials are stripped from the text (core/redact.py).
 
 The hash is salted per prompt because a plain one leaks exactly the prompts
 that matter most. "continue", "fix it" and "keep going" are a handful of
@@ -53,7 +57,7 @@ import json
 import os
 import time
 
-from . import ledger, paths
+from . import ledger, paths, redact, seal
 
 STATE_VERSION = 1
 
@@ -98,8 +102,14 @@ def state_path(rid, session_id):
     return os.path.join(turns_dir(rid), _session_key(session_id) + ".json")
 
 
-def prompts_path(rid, session_id):
-    return os.path.join(turns_dir(rid), _session_key(session_id) + ".prompts.jsonl")
+def sealed_path(rid, session_id):
+    return os.path.join(turns_dir(rid),
+                        _session_key(session_id) + ".prompts.sealed.jsonl")
+
+
+# Plaintext store written by 0.8.0 builds before sealing existed. Deleted on
+# sight by prune(); nothing reads it.
+_LEGACY_PLAINTEXT = ".prompts.jsonl"
 
 
 def _fresh():
@@ -179,6 +189,19 @@ def salted_hash(salt, text):
     """HMAC-SHA256 of the prompt, keyed by its own random salt."""
     return hmac.new(bytes.fromhex(salt), (text or "").encode("utf-8"),
                     hashlib.sha256).hexdigest()
+
+
+def prepare_prompt(text):
+    """Redact credentials, then compute features on what is left.
+
+    Returns (fields, salt, redacted_text). Order matters: the hash in the
+    ledger commits to the redacted text, which is the only version anything
+    downstream will ever hold.
+    """
+    clean, removed = redact.redact(text or "")
+    fields, salt = prompt_features(clean)
+    fields["prompt_redactions"] = removed
+    return fields, salt, clean
 
 
 def prompt_features(text):
@@ -261,19 +284,57 @@ def unfinished_edits(rid, since):
     return count
 
 
-def store_prompt(rid, session_id, turn, ts, text, salt):
-    """Keep the raw prompt, and the salt for its hash, locally.
+def prompt_aad(rid, session_key, turn, prompt_hmac):
+    """What a sealed prompt is bound to. The server rebuilds this from the
+    ledger record, so a box moved onto another turn, session or repo -- or
+    paired with a different commitment -- fails to open.
 
-    Never sent by anything in this version. The salt sits here and nowhere
-    else, which is what keeps the ledger's prompt_hmac unreadable until this
-    file is sealed and submitted.
+    `session_key` is turns.key(ctx): the session id, or the per-agent fallback
+    when there is none, exactly as the ledger record lets the server derive.
     """
-    path = prompts_path(rid, session_id)
+    return seal.canonical_aad({"v": 1, "rid": rid, "session": session_key,
+                               "turn": turn, "prompt_hmac": prompt_hmac})
+
+
+def seal_prompt(rid, session_key, turn, ts, text, salt, prompt_hmac, server_pk):
+    """Append one sealed prompt. Returns True if it was kept.
+
+    Without a server key nothing is written. Keeping the text in the clear
+    "until a key turns up" is exactly the copy of it this module exists to
+    avoid, and text sealed later would prove nothing anyway: the point of
+    sealing at prompt time is that the box exists alongside the commitment.
+
+    The salt goes inside the box and nowhere else, which is what keeps the
+    ledger's prompt_hmac meaningless to anyone without the server's key.
+    """
+    if not server_pk:
+        return False
+    plaintext = json.dumps({"turn": turn, "ts": ts, "salt": salt, "text": text},
+                           ensure_ascii=False).encode("utf-8")
+    box = seal.seal(server_pk, plaintext,
+                    prompt_aad(rid, session_key, turn, prompt_hmac))
+    path = sealed_path(rid, session_key)
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"turn": turn, "ts": ts, "salt": salt,
-                             "text": text}, ensure_ascii=False) + "\n")
+        fh.write(json.dumps({"turn": turn, "ts": ts, "box": box},
+                            separators=(",", ":")) + "\n")
+    return True
+
+
+def read_sealed(rid, session_key):
+    """Every sealed prompt kept for one session, oldest first."""
+    out = []
+    try:
+        with open(sealed_path(rid, session_key), "r", encoding="utf-8") as fh:
+            for line in fh:
+                try:
+                    out.append(json.loads(line))
+                except ValueError:
+                    continue
+    except OSError:
+        return []
+    return out
 
 
 def prune(max_age_days=RETENTION_DAYS):
@@ -294,7 +355,8 @@ def prune(max_age_days=RETENTION_DAYS):
         for name in names:
             path = os.path.join(directory, name)
             try:
-                if os.path.getmtime(path) < cutoff:
+                if (name.endswith(_LEGACY_PLAINTEXT)
+                        or os.path.getmtime(path) < cutoff):
                     os.unlink(path)
                     removed += 1
             except OSError:

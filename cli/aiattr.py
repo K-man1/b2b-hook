@@ -60,6 +60,14 @@ def cmd_status(_args):
         print("  hackatime  : on, but no key found in ~/.wakatime.cfg")
     else:
         print("  hackatime  : off")
+    seal_pk = config.seal_public_key()
+    if seal_pk:
+        from core import seal as _seal
+        print("  prompts    : kept sealed to server key {}".format(_seal.kid(seal_pk)))
+    elif cfg.get("seal_public_key"):
+        print("  prompts    : not kept (configured seal key is invalid)")
+    else:
+        print("  prompts    : not kept (no seal key configured)")
     ignored = cfg.get("ignore") or []
     print("  ignored    : {}".format(len(ignored)))
     for p in ignored:
@@ -188,6 +196,14 @@ def cmd_configure(args):
         cfg["sync"] = False
     if args.enable_sync:
         cfg["sync"] = True
+    if args.seal_key:
+        from core import seal as _seal
+        try:
+            _seal.parse_public_key(args.seal_key)
+        except _seal.SealError as exc:
+            print("Refusing to save this seal key: {}".format(exc))
+            return 1
+        cfg["seal_public_key"] = args.seal_key.strip()
     if args.enable_hackatime or args.disable_hackatime:
         ht = dict(cfg.get("hackatime") or {})
         ht["enabled"] = bool(args.enable_hackatime)
@@ -640,6 +656,9 @@ def main():
                    help="send the AI/human line split to your Hackatime "
                         "account, using the key in ~/.wakatime.cfg")
     c.add_argument("--disable-hackatime", action="store_true")
+    c.add_argument("--seal-key",
+                   help="the program's public key (hex or base64). Prompts are "
+                        "kept only sealed to it, readable by the server alone")
 
     p = sub.add_parser("projects", help="list tracked repositories")
     p.add_argument("--json", action="store_true")

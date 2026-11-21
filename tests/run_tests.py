@@ -811,6 +811,9 @@ def test_turns_record_how_the_human_steered():
         with open(target, "w") as fh:
             fh.write("print('start')\n")
         sid = "sess-1"
+        from core import config as config_mod, seal as seal_mod
+        server_sk, server_pk = seal_mod.generate_keypair()
+        config_mod.save({"seal_public_key": server_pk.hex()})
 
         def run(script, payload, *argv):
             payload = dict({"cwd": repo, "session_id": sid}, **payload)
@@ -898,10 +901,13 @@ def test_turns_record_how_the_human_steered():
         check("the chain stays intact with turn records in it",
               bad == [] and [r["seq"] for r in all_] == list(range(len(all_))))
 
-        stored = turns.prompts_path(paths.repo_id(repo), sid)
-        lines = open(stored).read().splitlines()
-        check("prompt text is kept locally for later sealing",
-              len(lines) == 4 and json.loads(lines[0])["text"] == secret)
+        stored = turns.sealed_path(paths.repo_id(repo), sid)
+        lines = [json.loads(l) for l in open(stored).read().splitlines()]
+        first = json.loads(seal_mod.open_box(
+            server_sk, lines[0]["box"],
+            turns.prompt_aad(paths.repo_id(repo), sid, 1, p1["prompt_hmac"])))
+        check("every prompt is kept, sealed, and opens with the server key",
+              len(lines) == 4 and first["text"] == secret)
         if os.name != "nt":
             check("stored prompts are readable only by the student",
                   (os.stat(stored).st_mode & 0o777) == 0o600,
@@ -950,6 +956,11 @@ class _TurnRepo:
                                   "..", "hooks")
         self.repo = os.path.join(d, "repo")
         os.makedirs(self.repo)
+        # The program's key pair. The student's machine only ever has the
+        # public half; tests play the server with the private one.
+        from core import config as config_mod, seal as seal_mod
+        self.sk, self.pk = seal_mod.generate_keypair()
+        config_mod.save({"seal_public_key": self.pk.hex()})
         subprocess.run(["git", "init", "-q"], cwd=self.repo, capture_output=True)
 
     def write(self, rel, text):
@@ -990,6 +1001,35 @@ class _TurnRepo:
             self.paths.ledger_path(self.paths.repo_id(self.repo)))
         return [r for r in recs if r.get("kind") == kind]
 
+    def opened(self, session_key="s1"):
+        """Open every sealed prompt the way the server would: AAD rebuilt
+        from the matching ledger record, never taken from the box."""
+        from core import seal as seal_mod, turns
+        rid = self.paths.repo_id(self.repo)
+        by_turn = {p["turn"]: p for p in self.records("prompt")
+                   if (p.get("session_id") or "nosession:" + p["agent"])
+                   == session_key}
+        out = []
+        for entry in turns.read_sealed(rid, session_key):
+            rec = by_turn[entry["turn"]]
+            aad = turns.prompt_aad(rid, session_key, entry["turn"],
+                                   rec["prompt_hmac"])
+            out.append((json.loads(seal_mod.open_box(self.sk, entry["box"], aad)),
+                        rec, entry))
+        return out
+
+    def data_files_contain(self, needle):
+        root = os.environ["AIATTR_DATA_DIR"]
+        for dirpath, _dirs, files in os.walk(root):
+            for name in files:
+                try:
+                    with open(os.path.join(dirpath, name), "rb") as fh:
+                        if needle.encode("utf-8") in fh.read():
+                            return True
+                except OSError:
+                    pass
+        return False
+
     def close(self):
         import importlib
         del os.environ["AIATTR_DATA_DIR"]
@@ -1019,10 +1059,9 @@ def test_prompt_hash_is_salted():
             raw = open(t.paths.ledger_path(t.paths.repo_id(t.repo))).read()
             check("the plain hash of a common prompt is not in the ledger",
                   plain not in raw)
-            stored = [json.loads(l) for l in open(turns.prompts_path(
-                t.paths.repo_id(t.repo), "s1")).read().splitlines()]
-            check("the stored salt reproduces the ledger's hash",
-                  turns.salted_hash(stored[0]["salt"], stored[0]["text"])
+            plain, _rec, _entry = t.opened()[0]
+            check("the sealed salt reproduces the ledger's hash",
+                  turns.salted_hash(plain["salt"], plain["text"])
                   == a["prompt_hmac"])
         finally:
             t.close()
@@ -1147,6 +1186,149 @@ def test_agents_without_session_ids_are_kept_apart():
             t.close()
 
 
+def test_seal_primitives_match_the_standards():
+    """Pure-Python crypto is only worth shipping if it is the real thing.
+
+    The RFC 7748 vector always runs. Where the `cryptography` package is
+    installed, every primitive is also checked against it, and a box is opened
+    the way a server would, with ordinary library calls and no code from this
+    repo -- which is the property that matters: any server can read these.
+    """
+    import os as _os
+    from core import seal
+    k = bytes.fromhex("a546e36bf0527c9d3b16154b82465edd62144c0ac1fc5a18506a2244ba449ac4")
+    u = bytes.fromhex("e6db6867583030db3594c1a424b15f7c726624ec26b3353b10a903a6d0ab1c4c")
+    check("X25519 matches the RFC 7748 test vector",
+          seal.x25519(k, u).hex() ==
+          "c3da55379de9c6908e94ea4df28d084f32eccf03491c71f754b4075577a28552")
+
+    sk, pk = seal.generate_keypair()
+    box = seal.seal(pk, b"hello", b"ctx")
+    check("a box opens with the right key and context",
+          seal.open_box(sk, box, b"ctx") == b"hello")
+    for label, attempt in (
+            ("the wrong context", lambda: seal.open_box(sk, box, b"other")),
+            ("the wrong key", lambda: seal.open_box(seal.generate_keypair()[0], box, b"ctx")),
+            ("a flipped ciphertext bit", lambda: seal.open_box(
+                sk, dict(box, ct=__import__("base64").b64encode(bytes(
+                    [__import__("base64").b64decode(box["ct"])[0] ^ 1])
+                    + __import__("base64").b64decode(box["ct"])[1:]).decode()), b"ctx"))):
+        try:
+            attempt()
+            ok = False
+        except seal.SealError:
+            ok = True
+        check("a box refuses to open with " + label, ok)
+    try:
+        seal.seal(bytes(32), b"x")
+        ok = False
+    except seal.SealError:
+        ok = True
+    check("sealing to a degenerate key is refused", ok)
+
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric.x25519 import (
+            X25519PrivateKey, X25519PublicKey)
+        from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
+        from cryptography.hazmat.primitives.kdf.hkdf import HKDF
+    except ImportError:
+        print("  skip cross-checks: the `cryptography` package is not installed")
+        return
+    import base64
+    raw = serialization.Encoding.Raw, serialization.PublicFormat.Raw
+    same = True
+    for _ in range(10):
+        a, b = _os.urandom(32), _os.urandom(32)
+        lib_pb = X25519PrivateKey.from_private_bytes(b).public_key().public_bytes(*raw)
+        same &= seal.public_key(b) == lib_pb
+        same &= seal.x25519(a, lib_pb) == X25519PrivateKey.from_private_bytes(
+            a).exchange(X25519PublicKey.from_public_bytes(lib_pb))
+    check("X25519 matches the cryptography package", same)
+    same = True
+    for n in (0, 1, 16, 63, 64, 65, 3000):
+        key, nonce, pt, aad = _os.urandom(32), _os.urandom(12), _os.urandom(n), _os.urandom(n % 33)
+        same &= seal.aead_encrypt(key, nonce, pt, aad) == ChaCha20Poly1305(key).encrypt(nonce, pt, aad)
+    check("ChaCha20-Poly1305 matches the cryptography package", same)
+
+    server = X25519PrivateKey.generate()
+    server_pk = server.public_key().public_bytes(*raw)
+    box = seal.seal(server_pk, "prompt ✓".encode("utf-8"), b"aad")
+    epk = bytes.fromhex(box["epk"])
+    shared = server.exchange(X25519PublicKey.from_public_bytes(epk))
+    key = HKDF(hashes.SHA256(), 32, epk + server_pk, seal.INFO).derive(shared)
+    opened = ChaCha20Poly1305(key).decrypt(
+        bytes.fromhex(box["nonce"]), base64.b64decode(box["ct"]), b"aad")
+    check("a server opens a box with standard library calls alone",
+          opened.decode("utf-8") == "prompt ✓")
+
+
+def test_prompts_are_only_kept_sealed():
+    """The text a reviewer needs must exist, must be unreadable on the
+    student's disk, and must be provably the text committed to at the time."""
+    import tempfile
+    from core import config as config_mod, seal, turns
+    with tempfile.TemporaryDirectory() as d:
+        t = _TurnRepo(d)
+        try:
+            t.write("a.py", "x = 1\n")
+            t.run("session.py", {})
+            key = "sk-ant-api03-" + "Q" * 30
+            t.run("prompt.py", {"prompt": "why does " + key + " get a 401 in client.py"})
+            t.run("stop.py", {})
+            t.run("prompt.py", {"prompt": "add retries to fetch_user"})
+            rec = t.records("prompt")
+
+            check("prompt records say a sealed copy exists",
+                  all(r.get("prompt_sealed") for r in rec), str(rec))
+            check("plaintext prompts are nowhere in the plugin's data",
+                  not t.data_files_contain("fetch_user")
+                  and not t.data_files_contain("client.py"))
+            check("a pasted credential is nowhere in the plugin's data",
+                  not t.data_files_contain(key))
+            check("the redaction is counted in the ledger",
+                  rec[0].get("prompt_redactions") == 1, str(rec[0]))
+
+            opened = t.opened()
+            check("the server can open every prompt",
+                  [p["text"] for p, _r, _e in opened]
+                  == ["why does [redacted:api_key] get a 401 in client.py",
+                      "add retries to fetch_user"], str(opened))
+            check("each opened prompt matches the commitment streamed at the time",
+                  all(turns.salted_hash(p["salt"], p["text"]) == r["prompt_hmac"]
+                      for p, r, _e in opened))
+
+            rid = t.paths.repo_id(t.repo)
+            box1 = opened[0][2]["box"]
+            try:
+                seal.open_box(t.sk, box1, turns.prompt_aad(
+                    rid, "s1", 2, rec[1]["prompt_hmac"]))
+                moved = True
+            except seal.SealError:
+                moved = False
+            check("a sealed prompt moved onto another turn will not open", not moved)
+
+            # No key: nothing kept, and the record says so.
+            config_mod.save({})
+            t.run("stop.py", {})
+            t.run("prompt.py", {"prompt": "unsealed turn"})
+            last = t.records("prompt")[-1]
+            check("with no seal key the prompt is not kept at all",
+                  last.get("prompt_sealed") is False
+                  and len(turns.read_sealed(rid, "s1")) == 2
+                  and not t.data_files_contain("unsealed turn"), str(last))
+
+            # A plaintext store from the build before sealing is deleted.
+            legacy = os.path.join(turns.turns_dir(rid), "old.prompts.jsonl")
+            with open(legacy, "w") as fh:
+                fh.write('{"text": "old plaintext"}\n')
+            turns.prune()
+            check("a leftover plaintext prompt store is deleted",
+                  not os.path.exists(legacy))
+        finally:
+            t.close()
+
+
 def main():
     import json as _json
     globals()["json"] = _json
@@ -1165,6 +1347,7 @@ def main():
     print("hook install scope");    test_hooks_install_machine_wide_by_default()
     print("opencode plugin");       test_opencode_plugin_records_the_same_way_a_config_hook_would()
     print("turns");                 test_turns_record_how_the_human_steered(); test_turn_hooks_are_wired()
+    print("sealing");               test_seal_primitives_match_the_standards(); test_prompts_are_only_kept_sealed()
     print("turn loopholes");        test_prompt_hash_is_salted(); test_hand_edits_count_writing_not_reshuffling()
     print("                ");      test_hand_edits_are_found_anywhere_in_the_project(); test_agents_without_session_ids_are_kept_apart()
     print()

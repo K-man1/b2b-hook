@@ -23,8 +23,8 @@ is where it is measured:
   permission_mode  how much the student is reviewing before changes land.
                    `bypassPermissions` and `acceptEdits` mean they are not.
 
-The prompt text is stored locally and never put in the ledger. See
-core/turns.py.
+The prompt text never goes in the ledger. It is redacted, then kept only
+sealed to the server's key, or not kept at all. See core/turns.py.
 
 Never blocks. UserPromptSubmit can block a prompt (exit 2), and a tracker that
 ate a student's prompt would be uninstalled the same afternoon, so this exits
@@ -143,7 +143,8 @@ def main(payload=None):
         hand = reconcile_hand_edits(ctx)
 
         turn = int(state.get("turn") or 0) + 1
-        fields, salt = C.turns.prompt_features(text)
+        fields, salt, text = C.turns.prepare_prompt(text)
+        server_pk = C.config.seal_public_key()
         fields.update(hand)
         fields.update({
             "turn": turn,
@@ -151,6 +152,9 @@ def main(payload=None):
             "prev_open": prev_open,
             "permission_mode": payload.get("permission_mode") or "",
             "no_session": not ctx["session_id"],
+            # Whether evidence for this turn exists at all. A missing box for
+            # a turn marked sealed is something the server should notice.
+            "prompt_sealed": bool(server_pk),
         })
         C.emit(ctx, "prompt", **fields)
 
@@ -163,7 +167,8 @@ def main(payload=None):
             "offset": C.turns.ledger_offset(ctx["ledger"]),
         }
         C.turns.save(ctx["rid"], key, state)
-        C.turns.store_prompt(ctx["rid"], key, turn, C.now_iso(), text, salt)
+        C.turns.seal_prompt(ctx["rid"], key, turn, C.now_iso(), text, salt,
+                            fields["prompt_hmac"], server_pk)
 
     C.spawn_stream(ctx)
 

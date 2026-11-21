@@ -163,6 +163,24 @@ def sync_enabled():
     return insecure_endpoint(cfg.get("endpoint")) is None
 
 
+def seal_public_key():
+    """The server key prompts are sealed to, as 32 raw bytes, or None.
+
+    None means prompts are not kept at all (see turns.seal_prompt). An
+    unparseable key is treated the same as no key rather than raising: a
+    hook may not fail, and sealing to a garbage key would keep text nobody,
+    including the server, can ever open.
+    """
+    from . import seal
+    raw = load().get("seal_public_key")
+    if not raw:
+        return None
+    try:
+        return seal.parse_public_key(raw)
+    except seal.SealError:
+        return None
+
+
 def ignored_repos():
     """Repo paths the student opted out of tracking.
 
