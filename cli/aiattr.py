@@ -6,6 +6,7 @@
     python3 cli/aiattr.py projects
     python3 cli/aiattr.py ignore /path/to/personal-repo
     python3 cli/aiattr.py sync
+    python3 cli/aiattr.py turns
 
 `configure` is what the website's "Install to Claude Code" flow calls after the
 plugin is installed, to bind this machine to a student account.
@@ -22,7 +23,7 @@ from core import adapters, agents, config, registry  # noqa: E402
 
 PLUGIN_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
-VERSION = "0.7.0"
+VERSION = "0.8.0"
 
 # The marketplace this plugin ships from, as named in the student's
 # ~/.claude/settings.json. Needed by name because that is the key the
@@ -257,6 +258,10 @@ def cmd_ignore(args):
         # would be sent on the next flush.
         if _heartbeat.forget(rid):
             print("Discarded its undelivered Hackatime heartbeats.")
+        # Stored prompt text is the most personal thing kept for a repo.
+        from core import turns as _turns
+        if _turns.forget(rid):
+            print("Deleted its stored prompts and turn history.")
         # Drop the local record stream too. Leaving it would keep undelivered
         # records for a repo the student just said is none of our business.
         try:
@@ -530,6 +535,82 @@ def cmd_flush(args):
     return 0
 
 
+def _fmt_secs(value):
+    if value is None:
+        return "-"
+    value = float(value)
+    if value < 60:
+        return "{:.0f}s".format(value)
+    if value < 3600:
+        return "{:.0f}m".format(value / 60)
+    return "{:.1f}h".format(value / 3600)
+
+
+def turn_rows(records, limit=None):
+    """Pair each prompt with the record that ended its turn.
+
+    Keyed by (session, turn) because two sessions in one repo share a ledger
+    and number their turns independently.
+    """
+    rows, by_key = [], {}
+    for rec in records:
+        key = (rec.get("session_id"), rec.get("turn"))
+        if rec.get("kind") == "prompt":
+            row = {"prompt": rec, "end": None}
+            by_key[key] = row
+            rows.append(row)
+        elif rec.get("kind") == "turn_end" and key in by_key:
+            by_key[key]["end"] = rec
+    return rows[-limit:] if limit else rows
+
+
+def cmd_turns(args):
+    """Show this repo's recent turns: what you brought, what the agent did.
+
+    Facts only. Nothing here says whether a turn was good; it shows the shape
+    of how you work with the agent, so you can see it for yourself.
+    """
+    from core import ledger, paths, repoutil
+
+    root = repoutil.repo_root(os.path.abspath(args.path or os.getcwd()))
+    if not root:
+        print("Not inside a project.")
+        return 1
+    records, _bad = ledger.read_all(paths.ledger_path(paths.repo_id(root)))
+    rows = turn_rows(records, args.limit)
+    if not rows:
+        print("No turns recorded for {} yet.".format(os.path.basename(root)))
+        return 0
+
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return 0
+
+    print("{:>4}  {:>7}  {:>7}  {:>6}  {:>8}  {:>6}  {:>11}  {}".format(
+        "turn", "review", "prompt", "hand", "agent", "ai", "ended", "mode"))
+    for row in rows:
+        p, e = row["prompt"], row["end"] or {}
+        print("{:>4}  {:>7}  {:>7}  {:>6}  {:>8}  {:>6}  {:>11}  {}".format(
+            p.get("turn", "?"),
+            "cut off" if p.get("prev_open") else _fmt_secs(p.get("review_gap_s")),
+            "{}ch".format(p.get("prompt_chars", 0)),
+            p.get("lines_human", 0),
+            _fmt_secs(e.get("agent_s")) if e else "open",
+            e.get("lines_ai", 0) if e else "-",
+            e.get("ended", "-") if e else "-",
+            p.get("permission_mode") or "-"))
+
+    ended = [r["end"] for r in rows if r["end"]]
+    print()
+    print("{} turns, {} cut off by you, {} hand-edited lines between turns, "
+          "{} AI lines.".format(
+              len(rows),
+              sum(1 for e in ended if e.get("ended") == "interrupted"),
+              sum(int(r["prompt"].get("lines_human") or 0) for r in rows),
+              sum(int(e.get("lines_ai") or 0) for e in ended)))
+    return 0
+
+
 def cmd_sync(_args):
     if not config.sync_enabled():
         print("Reporting is not configured. Run `configure` first.")
@@ -569,6 +650,11 @@ def main():
     f = sub.add_parser("flush", help="deliver any undelivered ledger records")
     f.add_argument("path", nargs="?", help="repository (default: current directory)")
 
+    t = sub.add_parser("turns", help="show recent prompt/agent turns in a repo")
+    t.add_argument("path", nargs="?", help="repository (default: current directory)")
+    t.add_argument("--limit", type=int, default=20)
+    t.add_argument("--json", action="store_true")
+
     h = sub.add_parser("install-hooks",
                        help="wire up an agent other than Claude Code")
     h.add_argument("tool", help="agent slug (e.g. cursor, codex), or 'list'")
@@ -581,6 +667,7 @@ def main():
         "status": cmd_status, "configure": cmd_configure,
         "projects": cmd_projects, "ignore": cmd_ignore, "sync": cmd_sync,
         "flush": cmd_flush, "install-hooks": cmd_install_hooks,
+        "turns": cmd_turns,
     }
     if args.cmd not in handlers:
         ap.print_help()

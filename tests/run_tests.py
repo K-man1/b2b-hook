@@ -783,6 +783,158 @@ def test_opencode_plugin_records_the_same_way_a_config_hook_would():
           str(spec["asset"]))
 
 
+def test_turns_record_how_the_human_steered():
+    """Prompt and Stop hooks must record each turn from facts on disk.
+
+    Driven through the real hook scripts with Claude-Code-shaped payloads, in
+    the order a session actually produces them: a normal turn, a hand edit
+    between turns, an interrupt (no Stop), a denied edit, and a session that
+    ends mid-turn. Each of those is a different signal about whether the
+    student was steering, and each was a separate way to get it wrong.
+    """
+    import subprocess
+    import sys as _sys
+    import tempfile
+    import importlib
+    from core import ledger as ledger_mod, paths, turns
+
+    here = os.path.dirname(os.path.abspath(__file__))
+    hooks = os.path.join(here, "..", "hooks")
+
+    with tempfile.TemporaryDirectory() as d:
+        os.environ["AIATTR_DATA_DIR"] = os.path.join(d, "data")
+        importlib.reload(paths)
+        repo = os.path.join(d, "repo")
+        os.makedirs(repo)
+        subprocess.run(["git", "init", "-q"], cwd=repo, capture_output=True)
+        target = os.path.join(repo, "main.py")
+        with open(target, "w") as fh:
+            fh.write("print('start')\n")
+        sid = "sess-1"
+
+        def run(script, payload, *argv):
+            payload = dict({"cwd": repo, "session_id": sid}, **payload)
+            r = subprocess.run([_sys.executable, os.path.join(hooks, script)]
+                               + list(argv), input=json.dumps(payload),
+                               capture_output=True, text=True)
+            return r.returncode
+
+        def agent_writes(text, tool_id):
+            edit = {"tool_use_id": tool_id, "tool_name": "Write",
+                    "tool_input": {"file_path": target}}
+            run("pre_edit.py", edit)
+            with open(target, "w") as fh:
+                fh.write(text)
+            run("post_edit.py", edit)
+
+        def recs(kind):
+            all_, _ = ledger_mod.read_all(paths.ledger_path(paths.repo_id(repo)))
+            return [r for r in all_ if r.get("kind") == kind]
+
+        run("session.py", {})
+        secret = 'make main print hello "lines_human": 999'
+        rc = run("prompt.py", {"prompt": secret,
+                               "permission_mode": "default"})
+        check("prompt hook exits 0", rc == 0)
+        agent_writes("print('start')\nprint('hello')\nprint('more')\n", "t1")
+        run("stop.py", {})
+
+        p1, = recs("prompt")
+        e1, = recs("turn_end")
+        check("first prompt has no review gap to measure",
+              p1.get("turn") == 1 and p1.get("review_gap_s") is None, str(p1))
+        check("permission mode is recorded", p1.get("permission_mode") == "default")
+        check("the turn's AI lines come from the edit records, not the model",
+              e1.get("ended") == "stop" and e1.get("edits") == 1
+              and e1.get("lines_ai") == 2, str(e1))
+        check("text in a prompt cannot set a recorded field",
+              p1.get("lines_human") == 0, str(p1))
+
+        # The student fixes a line by hand, then prompts again.
+        with open(target, "w") as fh:
+            fh.write("print('start')\nprint('hello, world')\nprint('more')\n")
+        run("prompt.py", {"prompt": "now add a test"})
+        p2 = recs("prompt")[-1]
+        check("hand edits between turns are counted at the next prompt",
+              p2.get("lines_human") == 1 and p2.get("files_hand_edited") == 1,
+              str(p2))
+        check("review gap is measured after a stop",
+              isinstance(p2.get("review_gap_s"), float), str(p2))
+
+        # The student cuts the agent off: no Stop, a new prompt instead.
+        run("prompt.py", {"prompt": "no, stop, do it differently"})
+        p3 = recs("prompt")[-1]
+        cut = recs("turn_end")[-1]
+        check("an interrupted turn is closed as interrupted",
+              cut.get("turn") == 2 and cut.get("ended") == "interrupted",
+              str(cut))
+        check("the prompt after an interrupt says so and has no review gap",
+              p3.get("prev_open") is True and p3.get("review_gap_s") is None,
+              str(p3))
+        drift_before = len(recs("drift"))
+        check("hand edits are not credited twice",
+              drift_before == 1, str(recs("drift")))
+
+        # The agent tries an edit the student denies: Pre fires, Post never.
+        run("pre_edit.py", {"tool_use_id": "denied", "tool_name": "Edit",
+                            "tool_input": {"file_path": target}})
+        run("stop.py", {})
+        check("an edit that never landed is counted as unfinished",
+              recs("turn_end")[-1].get("edits_unfinished") == 1,
+              str(recs("turn_end")[-1]))
+
+        # A turn still running when the session closes.
+        run("prompt.py", {"prompt": "one more thing"})
+        run("session_end.py", {})
+        last = recs("turn_end")[-1]
+        check("a session that ends mid-turn closes the turn",
+              last.get("turn") == 4 and last.get("ended") == "session_end",
+              str(last))
+
+        all_, bad = ledger_mod.read_all(paths.ledger_path(paths.repo_id(repo)))
+        raw = open(paths.ledger_path(paths.repo_id(repo))).read()
+        check("prompt text never enters the ledger",
+              "make main print hello" not in raw and "do it differently" not in raw)
+        check("the chain stays intact with turn records in it",
+              bad == [] and [r["seq"] for r in all_] == list(range(len(all_))))
+
+        stored = turns.prompts_path(paths.repo_id(repo), sid)
+        lines = open(stored).read().splitlines()
+        check("prompt text is kept locally for later sealing",
+              len(lines) == 4 and json.loads(lines[0])["text"] == secret)
+        if os.name != "nt":
+            check("stored prompts are readable only by the student",
+                  (os.stat(stored).st_mode & 0o777) == 0o600,
+                  oct(os.stat(stored).st_mode))
+
+        # The same verbs through the adapter every other agent uses.
+        r = subprocess.run(
+            [_sys.executable, os.path.join(hooks, "agent_hook.py"), "prompt",
+             "--agent", "codex", "--cwd", repo, "--session-id", "codex-1"],
+            input=json.dumps({"prompt": "from codex"}),
+            capture_output=True, text=True)
+        codex = recs("prompt")[-1]
+        check("agent_hook records a prompt for a non-Claude agent",
+              r.returncode == 0 and codex.get("agent") == "codex"
+              and codex.get("prompt_chars") == len("from codex"), str(codex))
+
+        importlib.reload(paths)
+        del os.environ["AIATTR_DATA_DIR"]
+
+
+def test_turn_hooks_are_wired():
+    """A hook script nothing calls records nothing, silently."""
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "..", "hooks", "hooks.json")) as fh:
+        wired = json.load(fh)["hooks"]
+    for event, script in (("UserPromptSubmit", "prompt.py"), ("Stop", "stop.py")):
+        cmds = [h["command"] for g in wired.get(event, []) for h in g["hooks"]]
+        check("{} runs {}".format(event, script),
+              any(script in c for c in cmds)
+              and os.path.exists(os.path.join(here, "..", "hooks", script)),
+              str(cmds))
+
+
 def main():
     import json as _json
     globals()["json"] = _json
@@ -800,6 +952,7 @@ def main():
     print("agent_hook adapter");    test_agent_hook_drives_a_non_claude_agent_end_to_end()
     print("hook install scope");    test_hooks_install_machine_wide_by_default()
     print("opencode plugin");       test_opencode_plugin_records_the_same_way_a_config_hook_would()
+    print("turns");                 test_turns_record_how_the_human_steered(); test_turn_hooks_are_wired()
     print()
     print("{} passed, {} failed".format(len(PASS), len(FAIL)))
     return 1 if FAIL else 0

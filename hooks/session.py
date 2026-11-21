@@ -260,6 +260,9 @@ def main(payload=None):
 
     migrate_legacy()
     clean_pending(ctx)
+    # Stored prompt text is the most sensitive thing kept locally. Expire it
+    # on the same once-per-session cadence as the other housekeeping.
+    C.turns.prune()
 
     # Register this repo so it appears in the student's project picker, even if
     # the session produces no edits. Working in a folder is what makes it a

@@ -14,6 +14,8 @@ what counts as an AI-written line.
     python3 agent_hook.py session-start --agent cursor
     python3 agent_hook.py pre-edit      --agent cursor --file src/main.py
     python3 agent_hook.py edit          --agent cursor --file src/main.py
+    python3 agent_hook.py prompt        --agent cursor   (prompt text on stdin)
+    python3 agent_hook.py stop          --agent cursor
     python3 agent_hook.py session-end   --agent cursor
 
 Every field can come from argv, the environment, or stdin JSON, because which
@@ -41,8 +43,10 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import _common as C  # noqa: E402
 import post_edit  # noqa: E402
 import pre_edit  # noqa: E402
+import prompt  # noqa: E402
 import session  # noqa: E402
 import session_end  # noqa: E402
+import stop  # noqa: E402
 
 # Environment fallbacks, in preference order per field. Agents that expose their
 # state as variables rather than arguments are covered without a bespoke adapter
@@ -56,6 +60,8 @@ EVENTS = {
     "session-start": session.main,
     "pre-edit": pre_edit.main,
     "edit": post_edit.main,
+    "prompt": prompt.main,
+    "stop": stop.main,
     "session-end": session_end.main,
 }
 
@@ -166,6 +172,11 @@ def build_payload(argv):
         "aiattr_agent": args.get("agent") or stdin.get("agent")
         or os.environ.get("AIATTR_AGENT"),
         "reason": pick("reason", ("AIATTR_REASON",)),
+        # Only meaningful for `prompt`. Read from the agent's own stdin JSON,
+        # where every tool with a prompt hook puts it under `prompt`; never
+        # from argv, where it would sit in the process list for anyone to see.
+        "prompt": stdin.get("prompt") or "",
+        "permission_mode": pick("permission_mode", ("AIATTR_PERMISSION_MODE",)),
     }
     return payload
 

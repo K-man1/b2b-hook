@@ -1,5 +1,5 @@
 {
-  "description": "AI authorship attribution: per-line provenance tracking, streamed to the course server",
+  "description": "AI authorship attribution and per-turn steering records, streamed to the course server",
   "hooks": {
     "SessionStart": [
       {
@@ -20,6 +20,17 @@
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/py.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/sync.py\"",
             "async": true,
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/py.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/prompt.py\"",
             "timeout": 30
           }
         ]
@@ -54,6 +65,17 @@
           {
             "type": "command",
             "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/py.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/post_bash.py\"",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/hooks/py.sh\" \"${CLAUDE_PLUGIN_ROOT}/hooks/stop.py\"",
             "timeout": 30
           }
         ]
