@@ -1329,6 +1329,192 @@ def test_prompts_are_only_kept_sealed():
             t.close()
 
 
+def test_seal_vector_is_reproducible():
+    """The vector in tests/vectors/seal_v1.json is what docs/evidence-spec.md
+    tells a server author to check against. It must be what this code makes."""
+    from core import seal, turns
+    here = os.path.dirname(os.path.abspath(__file__))
+    with open(os.path.join(here, "vectors", "seal_v1.json"), encoding="utf-8") as fh:
+        v = json.load(fh)
+    sk = bytes.fromhex(v["server_private_key_hex"])
+    eph = bytes.fromhex(v["ephemeral_private_key_hex"])
+    rec = v["record"]
+    aad = turns.prompt_aad(rec["rid"], rec["session"], rec["turn"], rec["prompt_hmac"])
+    check("the vector's AAD is rebuilt byte for byte",
+          aad.decode("ascii") == v["aad_utf8"])
+    box = seal.seal(seal.public_key(sk), v["plaintext_utf8"].encode("utf-8"), aad,
+                    _eph_sk=eph, _nonce=bytes.fromhex(v["box"]["nonce"]))
+    check("sealing the vector's inputs reproduces its box", box == v["box"],
+          json.dumps(box))
+    plain = json.loads(seal.open_box(sk, v["box"], aad).decode("utf-8"))
+    check("the vector opens and matches its commitment",
+          turns.salted_hash(plain["salt"], plain["text"]) == rec["prompt_hmac"])
+
+
+class _FakeServer:
+    """Just enough of a program server: the record stream, the index sync,
+    and the submission endpoint, which runs core/verify.py like the spec says
+    a real server must."""
+
+    def __init__(self, server_sk):
+        import http.server
+        import threading
+        import time as _t
+        from core import seal, verify
+        outer = self
+        self.records, self.received, self.results, self.submissions = {}, {}, [], 0
+        keys = {seal.kid(seal.public_key(server_sk)): server_sk}
+
+        class H(http.server.BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                if self.path.endswith("/records"):
+                    key = body["repo"]["key"]
+                    store = outer.records.setdefault(key, [])
+                    for r in body["records"]:
+                        if r["seq"] == len(store):
+                            store.append(r)
+                            outer.received[(key, r["seq"])] = _t.time()
+                    reply = {"next_seq": len(store), "expected_seq": len(store)}
+                elif self.path.endswith("/submissions"):
+                    key = body["repo"]["key"]
+                    got = {seq: at for (k, seq), at in outer.received.items() if k == key}
+                    res = verify.verify_submission(body, outer.records.get(key, []),
+                                                   keys, got)
+                    outer.results.append(res)
+                    outer.submissions += 1
+                    reply = {"submission_id": "sub-{}".format(outer.submissions),
+                             "accepted": len(res["accepted"]),
+                             "rejected": len(res["rejected"]),
+                             "missing": len(res["missing"])}
+                else:
+                    reply = {}
+                data = json.dumps(reply).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        self.httpd = http.server.HTTPServer(("127.0.0.1", 0), H)
+        self.url = "http://127.0.0.1:{}".format(self.httpd.server_address[1])
+        threading.Thread(target=self.httpd.serve_forever, daemon=True).start()
+
+    def close(self):
+        self.httpd.shutdown()
+        self.httpd.server_close()
+
+
+def test_submit_sends_evidence_the_server_can_verify():
+    """The whole loop: turns are committed as they happen, a submission
+    reveals them, and the server accepts what matches and catches what does
+    not -- a forged prompt, a withheld turn, a commitment it never got."""
+    import subprocess
+    import sys as _sys
+    import tempfile
+    from core import config as config_mod, seal, turns
+    cli = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..",
+                       "cli", "aiattr.py")
+    with tempfile.TemporaryDirectory() as d:
+        t = _TurnRepo(d)
+        server = _FakeServer(t.sk)
+        try:
+            cfg = config_mod.load()
+            cfg.update({"endpoint": server.url, "api_key": "test-key",
+                        "student_id": "student-1"})
+            config_mod.save(cfg)
+
+            def submit(*argv):
+                return subprocess.run([_sys.executable, cli, "submit", t.repo] + list(argv),
+                                      capture_output=True, text=True,
+                                      stdin=subprocess.DEVNULL)
+
+            t.write("a.py", "x = 1\n")
+            t.run("session.py", {})
+            for n, words in enumerate(["add a parser", "why does it drop the last line",
+                                       "write a test for empty input"], 1):
+                t.run("prompt.py", {"prompt": words})
+                t.agent_write("a.py", "x = {}\n".format(n + 1), "w{}".format(n))
+                t.run("stop.py", {})
+
+            out = submit("--dry-run", "--out", os.path.join(d, "bundle.json"))
+            check("a dry run shows the submission and sends nothing",
+                  out.returncode == 0 and server.submissions == 0
+                  and "3 from 1 session" in out.stdout, out.stdout + out.stderr)
+            bundle = json.load(open(os.path.join(d, "bundle.json")))
+            check("the saved bundle carries boxes, not prompt text",
+                  "drop the last line" not in json.dumps(bundle)
+                  and len(bundle["prompts"]) == 3)
+
+            out = submit("--program", "test")
+            check("submitting without --yes off a terminal asks for it",
+                  out.returncode == 1 and server.submissions == 0, out.stdout)
+
+            out = submit("--program", "test", "--yes")
+            res = server.results[-1] if server.results else {}
+            check("an honest submission is accepted in full",
+                  out.returncode == 0 and res.get("ledger_ok")
+                  and len(res.get("accepted", [])) == 3
+                  and not res.get("rejected") and not res.get("missing"),
+                  out.stdout + json.dumps(res))
+            check("the server reads back exactly what was typed",
+                  [a["text"] for a in res.get("accepted", [])]
+                  == ["add a parser", "why does it drop the last line",
+                      "write a test for empty input"])
+            check("commitments arrived in time, so nothing is flagged",
+                  all(not a["flags"] for a in res.get("accepted", [])),
+                  json.dumps(res.get("accepted")))
+            log = json.load(open(os.path.join(os.environ["AIATTR_DATA_DIR"],
+                                              "submissions.json")))
+            check("the submission is remembered locally",
+                  log[-1]["id"] == "sub-1" and log[-1]["prompts"] == 3, str(log))
+
+            rid = t.paths.repo_id(t.repo)
+            path = turns.sealed_path(rid, "s1")
+            lines = open(path).read().splitlines()
+
+            # Forge: the student seals different text for turn 2. They hold the
+            # public key and can rebuild the AAD from their own ledger; what
+            # they cannot do is match a commitment without its salt.
+            rec2 = [r for r in t.records("prompt") if r["turn"] == 2][0]
+            forged = seal.seal(t.pk, json.dumps({"turn": 2, "ts": rec2["ts"],
+                                                 "salt": "00" * 16,
+                                                 "text": "a much better prompt"}).encode(),
+                               turns.prompt_aad(rid, "s1", 2, rec2["prompt_hmac"]))
+            entry = json.loads(lines[1])
+            entry["box"] = forged
+            with open(path, "w") as fh:
+                fh.write("\n".join([lines[0], json.dumps(entry)]) + "\n")
+            submit("--yes")
+            res = server.results[-1]
+            check("a forged prompt is rejected against its commitment",
+                  [r["reason"] for r in res["rejected"]] == ["commitment_mismatch"],
+                  json.dumps(res["rejected"]))
+            check("a withheld turn shows up as missing evidence",
+                  [m["turn"] for m in res["missing"]] == [3],
+                  json.dumps(res["missing"]))
+
+            # The server is unreachable and a new prompt's record has not
+            # reached it: no submission, because nothing could be checked.
+            with open(path, "w") as fh:
+                fh.write("\n".join(lines) + "\n")
+            cfg = config_mod.load()
+            cfg["endpoint"] = "http://127.0.0.1:9"
+            config_mod.save(cfg)
+            t.run("prompt.py", {"prompt": "one more"})
+            before = server.submissions
+            out = submit("--yes")
+            check("submission refuses while commitments are undelivered",
+                  out.returncode == 1 and server.submissions == before
+                  and "have not reached the server" in out.stdout, out.stdout)
+        finally:
+            server.close()
+            t.close()
+
+
 def main():
     import json as _json
     globals()["json"] = _json
@@ -1348,6 +1534,7 @@ def main():
     print("opencode plugin");       test_opencode_plugin_records_the_same_way_a_config_hook_would()
     print("turns");                 test_turns_record_how_the_human_steered(); test_turn_hooks_are_wired()
     print("sealing");               test_seal_primitives_match_the_standards(); test_prompts_are_only_kept_sealed()
+    print("submission");            test_seal_vector_is_reproducible(); test_submit_sends_evidence_the_server_can_verify()
     print("turn loopholes");        test_prompt_hash_is_salted(); test_hand_edits_count_writing_not_reshuffling()
     print("                ");      test_hand_edits_are_found_anywhere_in_the_project(); test_agents_without_session_ids_are_kept_apart()
     print()

@@ -19,6 +19,7 @@ CONFIG_NAME = "config.json"
 DEFAULT_ENDPOINT = ""
 DEFAULT_SYNC_PATH = "/api/attribution/sync"
 DEFAULT_RECORDS_PATH = "/api/attribution/records"
+DEFAULT_SUBMIT_PATH = "/api/attribution/submissions"
 
 # How hard the streaming hook tries. Both are overridable per-install because
 # the right values depend on the server, not the student.
@@ -129,6 +130,11 @@ def records_path():
     on distinct routes means a server can rate-limit or retain them differently.
     """
     return _route(load().get("records_path"), DEFAULT_RECORDS_PATH)
+
+
+def submit_path():
+    """Path a submission bundle is posted to. See docs/evidence-spec.md."""
+    return _route(load().get("submit_path"), DEFAULT_SUBMIT_PATH)
 
 
 def stream_interval():

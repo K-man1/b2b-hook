@@ -1,0 +1,26 @@
+{
+  "description": "Sealed prompt test vector, format v1. Everything here is derived from fixed seeds; see docs/evidence-spec.md.",
+  "server_private_key_hex": "fced1ccf560d215359a79395042c0313af9228a75dcf72a70f65b3163d147cdc",
+  "server_public_key_hex": "985533bff87acba121790ead7b3c712ee3d084eb1d5247feee404ba055b2204c",
+  "kid": "c1308f625a1417e1",
+  "ephemeral_private_key_hex": "14c2e8ae9c860f0725010ac55a79b770021116ed76115969d4c215a7bc432fa3",
+  "shared_secret_hex": "ecb8d7b7d5309beef43ae9efce9cf5a7e945855a1f4105565f22bae5a3b84e30",
+  "aead_key_hex": "565bcde5eca3672d28d6c66ec280a8ca288f133c514070b7077ddf743ca9607e",
+  "record": {
+    "rid": "0123456789abcdef",
+    "session": "3f1c2a9e-0d7b-4c55-9a1e-5b2f8c7d6e10",
+    "turn": 3,
+    "prompt_hmac": "764bc20cdf8743867057882380209e00bd64c53d2ba9e3fdbc41dc9c081708e2"
+  },
+  "aad_utf8": "{\"prompt_hmac\":\"764bc20cdf8743867057882380209e00bd64c53d2ba9e3fdbc41dc9c081708e2\",\"rid\":\"0123456789abcdef\",\"session\":\"3f1c2a9e-0d7b-4c55-9a1e-5b2f8c7d6e10\",\"turn\":3,\"v\":1}",
+  "plaintext_utf8": "{\"turn\": 3, \"ts\": \"2026-11-21T15:04:05Z\", \"salt\": \"0f1db32f2d0ca255aef5f7937434edd7\", \"text\": \"the login test fails because session.py never sets the cookie — why?\"}",
+  "salt_hex": "0f1db32f2d0ca255aef5f7937434edd7",
+  "box": {
+    "v": 1,
+    "alg": "X25519-HKDF-SHA256-ChaCha20Poly1305",
+    "kid": "c1308f625a1417e1",
+    "epk": "7f53394c36c7324d5751f251ea848bf8e3e4cf2ff9595afd78dd2efa345c1872",
+    "nonce": "3af792dc0a30ba7ecbcd58e7",
+    "ct": "5MZqwrgPRCmcpmkAoqVFslM0kqDaJ/GkVBmLJ5i3noUMckeo7YF+vKPDHYDpsHmPP//hnQXOSiZ/uLr4w0JihYDYZ/At0IfXVRxsrVIGxCLY2pBA8+SjLls5vkpj9bYwh8yOLqBxTac5NfOOEukgUGe44nxp1TkFEW45C1kkNDr69ohEodHl0EO4XWoMjZv1+qbR0hS9unoPXfAGn/zwmrPjWcEZtIBnJPRnvtxi5B7OHVA7NLNl"
+  }
+}

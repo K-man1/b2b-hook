@@ -252,17 +252,27 @@ def _derive(shared, eph_pk, server_pk):
 
 
 def canonical_aad(context):
-    """Associated data from a context dict: sorted, compact JSON."""
-    return json.dumps(context or {}, sort_keys=True,
-                      separators=(",", ":")).encode("utf-8")
+    """Associated data from a context dict: sorted, compact, ASCII-only JSON.
+
+    Every byte is specified, because a server in another language has to
+    rebuild it exactly: keys sorted, no whitespace, non-ASCII escaped as
+    \\uXXXX. See docs/evidence-spec.md.
+    """
+    return json.dumps(context or {}, sort_keys=True, separators=(",", ":"),
+                      ensure_ascii=True).encode("ascii")
 
 
-def seal(server_pk, plaintext, aad=b""):
-    """Encrypt `plaintext` (bytes) so only the holder of server_sk can open it."""
-    eph_sk = os.urandom(32)
+def seal(server_pk, plaintext, aad=b"", _eph_sk=None, _nonce=None):
+    """Encrypt `plaintext` (bytes) so only the holder of server_sk can open it.
+
+    `_eph_sk` and `_nonce` exist only to produce the fixed test vector in
+    tests/vectors/seal_v1.json. Reusing either in real use would be a serious
+    mistake, which is why nothing outside the tests passes them.
+    """
+    eph_sk = _eph_sk or os.urandom(32)
     eph_pk = public_key(eph_sk)
     key = _derive(x25519(eph_sk, server_pk), eph_pk, server_pk)
-    nonce = os.urandom(12)
+    nonce = _nonce or os.urandom(12)
     return {
         "v": VERSION,
         "alg": ALG,

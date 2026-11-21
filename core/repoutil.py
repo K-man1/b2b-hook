@@ -210,6 +210,16 @@ def remote_url(root):
     return url or None
 
 
+def head_commit(root):
+    """The checked-out commit's sha, or None (no git, or no commits yet).
+
+    Sent with a submission so the server can line the evidence up against
+    the pushed history it fetches for itself.
+    """
+    out = _git(root, ["rev-parse", "--verify", "-q", "HEAD"])
+    return out.strip() if out and out.strip() else None
+
+
 def tracked_files(root):
     """Every file in the project, repo-relative, using the best source available.
 

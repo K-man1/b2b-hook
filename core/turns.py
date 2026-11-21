@@ -317,9 +317,50 @@ def seal_prompt(rid, session_key, turn, ts, text, salt, prompt_hmac, server_pk):
     os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
     fd = os.open(path, os.O_CREAT | os.O_WRONLY | os.O_APPEND, 0o600)
     with os.fdopen(fd, "a", encoding="utf-8") as fh:
-        fh.write(json.dumps({"turn": turn, "ts": ts, "box": box},
-                            separators=(",", ":")) + "\n")
+        # `session` is stored in the clear: the file name is a hash of it, and
+        # submission has to tell the server which session's record to check
+        # each box against. It is already in every ledger record.
+        fh.write(json.dumps({"session": session_key, "turn": turn, "ts": ts,
+                             "box": box}, separators=(",", ":")) + "\n")
     return True
+
+
+def collect_sealed(rid, since=None, until=None):
+    """Every sealed prompt kept for a repo, across sessions, oldest first.
+
+    `since`/`until` are `%Y-%m-%dT%H:%M:%SZ` strings, the form every entry
+    is written in, compared as text. Callers turn bare dates into full
+    stamps first (core/submit.normalize_bound).
+    """
+    out = []
+    try:
+        names = os.listdir(turns_dir(rid))
+    except OSError:
+        return []
+    for name in sorted(names):
+        if not name.endswith(".prompts.sealed.jsonl"):
+            continue
+        try:
+            with open(os.path.join(turns_dir(rid), name), "r",
+                      encoding="utf-8") as fh:
+                lines = fh.read().splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            ts = entry.get("ts") or ""
+            if not entry.get("session") or not isinstance(entry.get("box"), dict):
+                continue
+            if since and ts < since:
+                continue
+            if until and ts > until:
+                continue
+            out.append(entry)
+    out.sort(key=lambda e: (e.get("ts") or "", e.get("session"), e.get("turn") or 0))
+    return out
 
 
 def read_sealed(rid, session_key):

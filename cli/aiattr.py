@@ -7,6 +7,7 @@
     python3 cli/aiattr.py ignore /path/to/personal-repo
     python3 cli/aiattr.py sync
     python3 cli/aiattr.py turns
+    python3 cli/aiattr.py submit --since 2026-11-01 --program stardance
 
 `configure` is what the website's "Install to Claude Code" flow calls after the
 plugin is installed, to bind this machine to a student account.
@@ -511,6 +512,24 @@ def _scope_note(spec, scope):
                   spec.get("label", "This tool")))
 
 
+def _deliver(root):
+    """Run the streaming hook's flush for one repo. Returns records still
+    undelivered afterwards."""
+    from core import outbox, paths
+    hook = os.path.join(os.path.dirname(os.path.dirname(
+        os.path.abspath(__file__))), "hooks", "stream.py")
+    payload = json.dumps({"cwd": root, "session_id": "cli"})
+    import subprocess
+    try:
+        subprocess.run([sys.executable, hook, "flush"],
+                       input=payload, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        pass
+    rid = paths.repo_id(root)
+    _pending, remaining = outbox.unsent(rid, paths.ledger_path(rid))
+    return remaining
+
+
 def cmd_flush(args):
     """Send any ledger records the server has not acknowledged yet.
 
@@ -536,14 +555,7 @@ def cmd_flush(args):
     if not backlog:
         return 0
 
-    hook = os.path.join(os.path.dirname(os.path.dirname(
-        os.path.abspath(__file__))), "hooks", "stream.py")
-    payload = json.dumps({"cwd": root, "session_id": "cli"})
-    import subprocess
-    subprocess.run([sys.executable, hook, "flush"],
-                   input=payload, text=True, timeout=120)
-
-    _pending, remaining = outbox.unsent(rid, paths.ledger_path(rid))
+    remaining = _deliver(root)
     if remaining:
         print("{} still undelivered. The server may be unreachable.".format(remaining))
         return 1
@@ -630,6 +642,84 @@ def cmd_turns(args):
     return 0
 
 
+def cmd_submit(args):
+    """Send a project's sealed prompts as evidence for submitted hours.
+
+    The only path by which prompt text leaves the machine, and only ever
+    sealed. Shows what will be sent and asks first, because this is the one
+    command whose effect a student cannot take back.
+    """
+    from core import paths, repoutil, submit
+
+    if not config.sync_enabled():
+        print("Reporting is not configured. Run `configure` first.")
+        return 1
+    root = repoutil.repo_root(os.path.abspath(args.path or os.getcwd()))
+    if not root:
+        print("Not inside a project.")
+        return 1
+    try:
+        since = submit.normalize_bound(args.since)
+        until = submit.normalize_bound(args.until, end=True)
+    except submit.SubmitError as exc:
+        print(exc)
+        return 1
+
+    # The server checks every box against the prompt record it received at
+    # prompt time. If it does not hold those records yet it cannot check
+    # anything, so delivery comes first and is not optional.
+    remaining = _deliver(root)
+    if remaining:
+        print("{} ledger record(s) have not reached the server yet, so it "
+              "cannot check your prompts against them. Try again once you "
+              "are online.".format(remaining))
+        return 1
+
+    try:
+        bundle = submit.build_bundle(root, since, until, args.program)
+    except submit.SubmitError as exc:
+        print(exc)
+        return 1
+    s = submit.summarize(bundle)
+    print("Project  : {}".format(s["project"]))
+    if bundle.get("program"):
+        print("Program  : {}".format(bundle["program"]))
+    print("Prompts  : {} from {} session(s), {} to {}".format(
+        s["prompts"], s["sessions"], s["first"], s["last"]))
+    print("They are sealed: only the program's server can open them, and it "
+          "checks each one against the record it received when you wrote it.")
+
+    if args.out:
+        fd = os.open(args.out, os.O_CREAT | os.O_WRONLY | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(bundle, fh, indent=2)
+        print("Wrote {}".format(args.out))
+    if args.dry_run:
+        print("Dry run: nothing sent.")
+        return 0
+    if not args.yes:
+        if not sys.stdin.isatty():
+            print("Re-run with --yes to send.")
+            return 1
+        if input("Send? [y/N] ").strip().lower() not in ("y", "yes"):
+            print("Nothing sent.")
+            return 1
+
+    try:
+        reply = submit.post(bundle)
+    except submit.SubmitError as exc:
+        print(exc)
+        return 1
+    submit.record(bundle, reply)
+    print("Submitted{}.".format(
+        " as " + str(reply["submission_id"]) if reply.get("submission_id") else ""))
+    for key, label in (("accepted", "accepted"), ("rejected", "rejected"),
+                       ("missing", "turns with no evidence submitted")):
+        if isinstance(reply.get(key), int):
+            print("  {:<5} {}".format(reply[key], label))
+    return 0
+
+
 def cmd_sync(_args):
     if not config.sync_enabled():
         print("Reporting is not configured. Run `configure` first.")
@@ -672,6 +762,17 @@ def main():
     f = sub.add_parser("flush", help="deliver any undelivered ledger records")
     f.add_argument("path", nargs="?", help="repository (default: current directory)")
 
+    sm = sub.add_parser("submit",
+                        help="send a project's sealed prompts as evidence "
+                             "for submitted hours")
+    sm.add_argument("path", nargs="?", help="repository (default: current directory)")
+    sm.add_argument("--since", help="first day (2026-11-01) or UTC timestamp")
+    sm.add_argument("--until", help="last day (2026-11-21) or UTC timestamp")
+    sm.add_argument("--program", help="which program the hours are for")
+    sm.add_argument("--out", help="also save the bundle to this file")
+    sm.add_argument("--dry-run", action="store_true", help="show, do not send")
+    sm.add_argument("--yes", action="store_true", help="send without asking")
+
     t = sub.add_parser("turns", help="show recent prompt/agent turns in a repo")
     t.add_argument("path", nargs="?", help="repository (default: current directory)")
     t.add_argument("--limit", type=int, default=20)
@@ -689,7 +790,7 @@ def main():
         "status": cmd_status, "configure": cmd_configure,
         "projects": cmd_projects, "ignore": cmd_ignore, "sync": cmd_sync,
         "flush": cmd_flush, "install-hooks": cmd_install_hooks,
-        "turns": cmd_turns,
+        "turns": cmd_turns, "submit": cmd_submit,
     }
     if args.cmd not in handlers:
         ap.print_help()
